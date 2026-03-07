@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+import argparse
+import queue
+import re
+import socket
+import threading
+from dataclasses import dataclass
+from typing import Dict, Tuple, Optional
+
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-]{0,19}$")  # 1..20 chars
+MAX_LINE = 8192  # bytes por línea (anti-abuso simple)
+
+
+@dataclass
+class Client:
+    username: str
+    sock: socket.socket
+    addr: Tuple[str, int]
+    out_q: "queue.Queue[bytes]"
+    alive: threading.Event
+
+
+class ChatServer:
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+
+        self.clients: Dict[str, Client] = {}
+        self.clients_lock = threading.RLock()
+
+        self.stop_event = threading.Event()
+
+    # ---------- Utilidades de envío ----------
+    @staticmethod
+    def _encode_line(text: str) -> bytes:
+        # Mensajes terminan en \n para framing por líneas
+        return (text.rstrip("\r\n") + "\n").encode("utf-8", errors="replace")
+
+    def send_to(self, username: str, text: str) -> bool:
+        with self.clients_lock:
+            c = self.clients.get(username)
+            if not c:
+                return False
+            c.out_q.put(self._encode_line(text))
+            return True
+
+    def broadcast(self, text: str, exclude: Optional[str] = None) -> None:
+        payload = self._encode_line(text)
+        with self.clients_lock:
+            for u, c in self.clients.items():
+                if exclude is not None and u == exclude:
+                    continue
+                c.out_q.put(payload)
+
+    def list_users(self) -> str:
+        with self.clients_lock:
+            users = sorted(self.clients.keys())
+        return ", ".join(users) if users else "(nadie)"
+
+    # ---------- Lectura por líneas (buffered) ----------
+    @staticmethod
+    def recv_line(sock: socket.socket, buffer: bytearray) -> Optional[str]:
+        """
+        Lee hasta '\n'. Devuelve la línea (sin '\n') o None si se cerró el socket.
+        Lanza ValueError si la línea excede MAX_LINE.
+        """
+        while True:
+            nl = buffer.find(b"\n")
+            if nl != -1:
+                line = buffer[:nl]
+                del buffer[: nl + 1]
+                if len(line) > MAX_LINE:
+                    raise ValueError("Línea demasiado larga")
+                return line.decode("utf-8", errors="replace").rstrip("\r")
+
+            chunk = sock.recv(4096)
+            if not chunk:
+                return None
+            buffer.extend(chunk)
+            if len(buffer) > MAX_LINE * 2:
+                raise ValueError("Buffer demasiado grande")
+
+    # ---------- Manejo de cliente ----------
+    def client_writer(self, client: Client) -> None:
+        try:
+            while client.alive.is_set() and not self.stop_event.is_set():
+                try:
+                    data = client.out_q.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                try:
+                    client.sock.sendall(data)
+                except OSError:
+                    break
+        finally:
+            # El reader se encarga de cerrar todo; aquí solo salimos.
+            pass
+
+    def disconnect(self, username: str, reason: str = "desconectado") -> None:
+        with self.clients_lock:
+            client = self.clients.pop(username, None)
+
+        if client:
+            client.alive.clear()
+            try:
+                client.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                client.sock.close()
+            except OSError:
+                pass
+            self.broadcast(f"* {username} {reason}.", exclude=None)
+
+    def handle_message(self, sender: str, line: str) -> None:
+        line = line.strip()
+        if not line:
+            return
+
+        # Comandos
+        if line.startswith("/"):
+            parts = line.split(maxsplit=2)
+            cmd = parts[0].lower()
+
+            if cmd == "/who":
+                self.send_to(sender, f"* Conectados: {self.list_users()}")
+                return
+
+            if cmd == "/help":
+                self.send_to(sender, "* Comandos: /who, /msg <user> <msg>, /all <msg>, /help")
+                self.send_to(sender, "* DM: @usuario mensaje")
+                return
+
+            if cmd == "/all" and len(parts) >= 2:
+                msg = line[len("/all"):].strip()
+                self.broadcast(f"[{sender}] {msg}", exclude=None)
+                return
+
+            if cmd == "/msg" and len(parts) >= 3:
+                target = parts[1]
+                msg = parts[2]
+                if target == sender:
+                    self.send_to(sender, "* No puedes mandarte DM a ti mismo.")
+                    return
+                if not self.send_to(target, f"[DM de {sender}] {msg}"):
+                    self.send_to(sender, f"* Usuario '{target}' no existe.")
+                else:
+                    self.send_to(sender, f"[DM a {target}] {msg}")
+                return
+
+            self.send_to(sender, "* Comando no reconocido. Usa /help")
+            return
+
+        # DM estilo @usuario mensaje
+        if line.startswith("@"):
+            parts = line.split(maxsplit=1)
+            if len(parts) < 2:
+                self.send_to(sender, "* Uso: @usuario mensaje")
+                return
+            target = parts[0][1:]
+            msg = parts[1]
+            if target == sender:
+                self.send_to(sender, "* No puedes mandarte DM a ti mismo.")
+                return
+            if not self.send_to(target, f"[DM de {sender}] {msg}"):
+                self.send_to(sender, f"* Usuario '{target}' no existe.")
+            else:
+                self.send_to(sender, f"[DM a {target}] {msg}")
+            return
+
+        # Broadcast por defecto
+        self.broadcast(f"[{sender}] {line}", exclude=None)
+
+    def client_reader(self, sock: socket.socket, addr: Tuple[str, int]) -> None:
+        buffer = bytearray()
+        username: Optional[str] = None
+        alive = threading.Event()
+        alive.set()
+        out_q: "queue.Queue[bytes]" = queue.Queue()
+
+        try:
+            sock.settimeout(30.0)
+            sock.sendall(self._encode_line("* Bienvenido. Escribe: NICK tu_nombre"))
+            # Handshake NICK
+            while not self.stop_event.is_set():
+                line = self.recv_line(sock, buffer)
+                if line is None:
+                    return
+                line = line.strip()
+                if not line:
+                    continue
+
+                if line.upper().startswith("NICK "):
+                    proposed = line.split(maxsplit=1)[1].strip()
+                    if not USERNAME_RE.match(proposed):
+                        sock.sendall(self._encode_line("* Username inválido. Usa 1-20 chars: letras/números/_/-"))
+                        continue
+
+                    with self.clients_lock:
+                        if proposed in self.clients:
+                            sock.sendall(self._encode_line("* Ese username ya está en uso. Prueba otro."))
+                            continue
+                        username = proposed
+                        client = Client(username=username, sock=sock, addr=addr, out_q=out_q, alive=alive)
+                        self.clients[username] = client
+
+                    # Ya registrado: arrancamos writer
+                    writer_t = threading.Thread(target=self.client_writer, args=(client,), daemon=True)
+                    writer_t.start()
+
+                    # Mensajes iniciales
+                    self.send_to(username, f"* Conectado como '{username}'. Escribe /help para comandos.")
+                    self.broadcast(f"* {username} se unió al chat.", exclude=username)
+                    break
+                else:
+                    sock.sendall(self._encode_line("* Primero define tu nombre: NICK tu_nombre"))
+                    continue
+
+            if username is None:
+                return
+
+            # Loop normal
+            sock.settimeout(1.0)  # para poder checar stop_event sin colgarse
+            while alive.is_set() and not self.stop_event.is_set():
+                try:
+                    line = self.recv_line(sock, buffer)
+                except socket.timeout:
+                    continue
+                if line is None:
+                    break
+                try:
+                    self.handle_message(username, line)
+                except Exception:
+                    # No queremos tirar el server por un mensaje mal
+                    self.send_to(username, "* Error procesando tu mensaje.")
+        except (OSError, ValueError):
+            pass
+        finally:
+            if username is not None:
+                self.disconnect(username, reason="salió")
+            else:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+    # ---------- Loop principal ----------
+    def serve_forever(self) -> None:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind((self.host, self.port))
+        srv.listen(200)
+        srv.settimeout(1.0)
+
+        print(f"Servidor escuchando en {self.host}:{self.port}")
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    sock, addr = srv.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                t = threading.Thread(target=self.client_reader, args=(sock, addr), daemon=True)
+                t.start()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.stop_event.set()
+            try:
+                srv.close()
+            except OSError:
+                pass
+
+            # Cierra clientes
+            with self.clients_lock:
+                users = list(self.clients.keys())
+            for u in users:
+                self.disconnect(u, reason="fue desconectado (servidor cerrando)")
+
+            print("Servidor cerrado.")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Servidor de chat (TCP + threads)")
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=5050)
+    args = ap.parse_args()
+
+    ChatServer(args.host, args.port).serve_forever()
+
+
+if __name__ == "__main__":
+    main()
