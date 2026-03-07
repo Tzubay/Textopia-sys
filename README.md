@@ -22,6 +22,18 @@ python3 chat_server.py --port 5050
 
 Antes de comenzar a chatear, depemos acceder al Socket (en una terminal diferente a la que iniciaste el servidor)
 
+#### En caso de estar usando el cliente de chat:
+Si estas usando el cliente de chat, deberas de abrir una terminal en la direccion del proyecto, una vez en la direccion,
+deberas ejecutar el cliente. 
+
+```
+python3 chat_client.py --host 127.0.0.1 --port 5050 --nick alice
+```
+Esto se creara automaticamente tu session con el usuario «alice»
+Puedes cambiar el NICK por el que prefieras, nunca uses el mismo NICK 2 veces en diferentes terminales en simultaneo
+
+
+#### En caso de __NO__ estar usando el cliente de chat:
 ```
 nc 127.0.0.1 5050
 ```
