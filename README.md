@@ -22,6 +22,22 @@ python3 chat_server.py --port 5050
 
 Antes de comenzar a chatear, depemos acceder al Socket (en una terminal diferente a la que iniciaste el servidor)
 
+#### En caso de unar la Interfaz grafica de terminal
+Ahora contamos con una interfaz grafica UI en terminal, bastante simpoatica e intuitiva una vez que le entiendes 
+
+Para activarla, dirigete a la carpeta del repositorio y escribe el comando 
+```
+python3 chat_client_tui.py --host 127.0.0.1 --port 5050 --nick «NICK»
+```
+
+Por ejemplo: 
+```
+python3 chat_client_tui.py --host 127.0.0.1 --port 5050 --nick Jhon
+```
+
+Y así, te abrira una interfaz UI en la terminal. Los comandos son escencialmente iguales
+Ahora, cada conversacion vive en un hilo
+
 #### En caso de estar usando el cliente de chat:
 Si estas usando el cliente de chat, deberas de abrir una terminal en la direccion del proyecto, una vez en la direccion,
 deberas ejecutar el cliente. 
