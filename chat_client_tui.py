@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import curses
 import json
 import os
@@ -15,7 +16,8 @@ from typing import Dict, List, Optional, Tuple
 
 MAX_LINE = 8192
 CHUNK_SIZE = 64 * 1024
-MAX_UPLOAD_SIZE = 25 * 1024 * 1024  # debe coincidir con servidor
+WIRE_CHUNK_SIZE = 3 * 1024
+MAX_UPLOAD_SIZE = 200 * 1024 * 1024  # debe coincidir con servidor
 AUTO_WHO_INTERVAL = 15  # 0 para desactivar
 
 
@@ -77,6 +79,21 @@ class Conversation:
     unread: int = 0
 
 
+@dataclass
+class TransferState:
+    transfer_id: str
+    direction: str  # UP | DOWN
+    filename: str
+    scope: str
+    total: int
+    done: int
+    started_at: float
+    finished: bool = False
+    error: str = ""
+    out_path: str = ""
+    file_obj: Optional[object] = None
+
+
 class ChatClientTUI:
     def __init__(self, host: str, port: int, nick: str):
         self.host = host
@@ -104,6 +121,7 @@ class ChatClientTUI:
 
         # descargas pendientes: (scope, filename) -> dest_path
         self.pending_downloads: Dict[Tuple[str, str], str] = {}
+        self.transfers: Dict[str, TransferState] = {}
 
         # scroll por conversación
         self.scroll_offsets: Dict[str, int] = {}
@@ -161,6 +179,47 @@ class ChatClientTUI:
             if self.toast_text and time.time() > self.toast_until:
                 self.toast_text = ""
                 self.toast_until = 0.0
+
+    @staticmethod
+    def _fmt_eta(seconds: float) -> str:
+        if seconds < 0 or seconds > 24 * 3600:
+            return "--:--"
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        return f"{m:02d}:{s:02d}"
+
+    @staticmethod
+    def _fmt_rate(bytes_per_sec: float) -> str:
+        if bytes_per_sec <= 0:
+            return "0 B/s"
+        units = ["B/s", "KB/s", "MB/s", "GB/s"]
+        v = bytes_per_sec
+        for u in units:
+            if v < 1024 or u == units[-1]:
+                if u == "B/s":
+                    return f"{int(v)} {u}"
+                return f"{v:.1f} {u}"
+            v /= 1024.0
+        return f"{int(bytes_per_sec)} B/s"
+
+    def _build_transfer_status(self) -> Optional[str]:
+        with self.state_lock:
+            active = [t for t in self.transfers.values() if not t.finished and not t.error]
+            if not active:
+                return None
+            t = max(active, key=lambda x: x.started_at)
+            elapsed = max(0.001, time.time() - t.started_at)
+            rate = t.done / elapsed
+            pct = int((t.done / t.total) * 100) if t.total > 0 else 0
+            width = 18
+            fill = int(width * min(1.0, (t.done / t.total) if t.total > 0 else 0.0))
+            bar = "#" * fill + "-" * (width - fill)
+            remain = max(0, t.total - t.done)
+            eta = self._fmt_eta(remain / rate if rate > 0 else -1)
+            tag = "UP" if t.direction == "UP" else "DOWN"
+            return f"{tag} {t.filename} [{bar}] {pct}% {self._fmt_rate(rate)} ETA {eta}"
 
     def _select_next(self):
         with self.state_lock:
@@ -279,41 +338,94 @@ class ChatClientTUI:
                 meta = json.loads(line[len("FILEERR "):].strip())
                 scope = str(meta.get("scope", "SYSTEM"))
                 err = str(meta.get("error", "Error"))
+                transfer_id = str(meta.get("id", ""))
             except Exception:
                 return
             conv_key = self._scope_to_conv(scope)
             self._append_message(conv_key, f"* Error: {err}")
+            if transfer_id:
+                self._finish_transfer(transfer_id, err)
             self._toast(err)
             return
 
-        if line.startswith("FILEDATA "):
-            # header + bytes
+        if line.startswith("FILEDOWNLOADBEGIN "):
             try:
-                meta = json.loads(line[len("FILEDATA "):].strip())
+                meta = json.loads(line[len("FILEDOWNLOADBEGIN "):].strip())
+                transfer_id = str(meta.get("id", ""))
                 scope = str(meta.get("scope", "SYSTEM"))
                 filename = str(meta.get("filename", "file"))
                 size = int(meta.get("size", 0))
             except Exception:
-                self._append_message("SYSTEM", "* FILEDATA inválido")
                 return
 
+            if not transfer_id:
+                return
             conv_key = self._scope_to_conv(scope)
-            data = b""
             try:
-                if not self.sock:
-                    return
-                data = read_exact(self.sock, buffer, size)
+                key = (scope, filename)
+                dest = self.pending_downloads.pop(key, "")
+                out_path = self._resolve_download_path(filename, dest)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                fp = out_path.open("wb")
             except Exception:
-                self._append_message(conv_key, "* Error recibiendo bytes del archivo.")
+                self._append_message(conv_key, "* Error preparando descarga.")
                 self._toast("Error descargando")
                 return
 
-            # resolver destino
-            key = (scope, filename)
-            dest = self.pending_downloads.pop(key, "")
-            saved_to = self._save_download(filename, data, dest)
-            self._append_message(conv_key, f"* Archivo descargado: {saved_to}")
-            self._toast("Descarga completa")
+            with self.state_lock:
+                self.transfers[transfer_id] = TransferState(
+                    transfer_id=transfer_id,
+                    direction="DOWN",
+                    filename=filename,
+                    scope=scope,
+                    total=max(0, size),
+                    done=0,
+                    started_at=time.time(),
+                    out_path=str(out_path),
+                    file_obj=fp,
+                )
+            self.status_line = f"Descargando {filename}..."
+            return
+
+        if line.startswith("FILEDOWNLOADCHUNK "):
+            try:
+                meta = json.loads(line[len("FILEDOWNLOADCHUNK "):].strip())
+                transfer_id = str(meta.get("id", ""))
+                data_b64 = str(meta.get("data", ""))
+            except Exception:
+                return
+            if not transfer_id or not data_b64:
+                return
+            with self.state_lock:
+                t = self.transfers.get(transfer_id)
+            if not t or t.direction != "DOWN" or t.finished:
+                return
+            try:
+                chunk = base64.b64decode(data_b64.encode("ascii"), validate=True)
+                if t.file_obj:
+                    t.file_obj.write(chunk)
+                with self.state_lock:
+                    t.done += len(chunk)
+            except Exception:
+                self._finish_transfer(transfer_id, "Error procesando chunk")
+            return
+
+        if line.startswith("FILEDOWNLOADEND "):
+            try:
+                meta = json.loads(line[len("FILEDOWNLOADEND "):].strip())
+                transfer_id = str(meta.get("id", ""))
+            except Exception:
+                return
+            t = self._finish_transfer(transfer_id)
+            if not t:
+                return
+            conv_key = self._scope_to_conv(t.scope)
+            if t.error:
+                self._append_message(conv_key, f"* Error de descarga: {t.error}")
+                self._toast("Error descargando")
+            else:
+                self._append_message(conv_key, f"* Archivo descargado: {t.out_path}")
+                self._toast("Descarga completa")
             return
 
         # --- 0) Líneas de /who: SOLO actualizan estado, NO se guardan como mensajes ---
@@ -464,7 +576,7 @@ class ChatClientTUI:
         parts = [p.strip() for p in s.split(",")]
         return [p for p in parts if p]
 
-    def _save_download(self, filename: str, data: bytes, dest: str) -> str:
+    def _resolve_download_path(self, filename: str, dest: str) -> Path:
         safe = os.path.basename(filename) or "file"
 
         # Si no se especificó destino, usar ./DownloadsLocal/
@@ -498,8 +610,23 @@ class ChatClientTUI:
                     break
                 k += 1
 
-        out_path.write_bytes(data)
-        return str(out_path)
+        return out_path
+
+    def _finish_transfer(self, transfer_id: str, error: str = "") -> Optional[TransferState]:
+        with self.state_lock:
+            t = self.transfers.get(transfer_id)
+            if not t:
+                return None
+            t.finished = True
+            if error:
+                t.error = error
+        if t.file_obj:
+            try:
+                t.file_obj.close()
+            except Exception:
+                pass
+            t.file_obj = None
+        return t
 
     def start_upload(self, targets: List[str], filepath: str):
         if not self.sock:
@@ -507,6 +634,7 @@ class ChatClientTUI:
             return
 
         def worker():
+            transfer_id = ""
             try:
                 path = Path(filepath).expanduser()
                 if not path.exists() or not path.is_file():
@@ -521,29 +649,49 @@ class ChatClientTUI:
                     return
 
                 filename = path.name
-                meta = {"targets": targets, "filename": filename, "size": size}
-                header = "FILEUPLOAD " + json.dumps(meta, ensure_ascii=False)
+                transfer_id = f"up-{int(time.time() * 1000)}-{threading.get_ident()}"
+                meta = {"id": transfer_id, "targets": targets, "filename": filename, "size": size}
+                header = "FILEUPLOADBEGIN " + json.dumps(meta, ensure_ascii=False)
 
                 sent = 0
                 self.status_line = f"Subiendo {filename}..."
+                with self.state_lock:
+                    self.transfers[transfer_id] = TransferState(
+                        transfer_id=transfer_id,
+                        direction="UP",
+                        filename=filename,
+                        scope="MULTI",
+                        total=size,
+                        done=0,
+                        started_at=time.time(),
+                    )
 
-                with self.send_lock:
-                    self.sock.sendall(encode_line(header))
-                    with path.open("rb") as f:
-                        while True:
-                            chunk = f.read(CHUNK_SIZE)
-                            if not chunk:
-                                break
-                            self.sock.sendall(chunk)
-                            sent += len(chunk)
-                            if size > 0:
-                                pct = int((sent / size) * 100)
-                                self.status_line = f"Subiendo {filename}... {pct}%"
+                self.send_raw(header)
+                with path.open("rb") as f:
+                    while True:
+                        chunk = f.read(WIRE_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        payload = {
+                            "id": transfer_id,
+                            "data": base64.b64encode(chunk).decode("ascii"),
+                        }
+                        self.send_raw("FILEUPLOADCHUNK " + json.dumps(payload, ensure_ascii=False))
+                        sent += len(chunk)
+                        with self.state_lock:
+                            t = self.transfers.get(transfer_id)
+                            if t:
+                                t.done = sent
+
+                self.send_raw("FILEUPLOADEND " + json.dumps({"id": transfer_id}, ensure_ascii=False))
+                self._finish_transfer(transfer_id)
 
                 self.status_line = f"Upload completo: {filename}"
                 self._toast("Upload completo")
 
             except Exception:
+                if transfer_id:
+                    self._finish_transfer(transfer_id, "Error en upload")
                 self.status_line = "Error en upload"
                 self._toast("Error en upload")
 
@@ -804,7 +952,9 @@ class ChatClientTUI:
         help_line = "TAB/Shift+TAB o ←/→ cambiar chat | ↑/↓ scroll | Enter enviar | F5 /who | ESC limpiar | /quit salir"
         stdscr.attron(curses.color_pair(2))
         stdscr.addstr(h - footer_h, 0, help_line.ljust(w - 1)[: w - 1])
-        stdscr.addstr(h - footer_h + 1, 0, self.status_line.ljust(w - 1)[: w - 1])
+        transfer_status = self._build_transfer_status()
+        footer_status = transfer_status if transfer_status else self.status_line
+        stdscr.addstr(h - footer_h + 1, 0, footer_status.ljust(w - 1)[: w - 1])
         stdscr.attroff(curses.color_pair(2))
 
         self._clear_toast_if_expired()
@@ -928,4 +1078,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

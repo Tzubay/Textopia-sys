@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -19,8 +20,9 @@ ROOMNAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-]{0,19}$")  # 1..20 chars
 MAX_LINE = 8192
 
 # --- File transfer safeguards ---
-MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB (ajusta si quieres)
+MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB (ajusta si quieres)
 CHUNK_SIZE = 64 * 1024
+WIRE_CHUNK_SIZE = 3 * 1024
 
 
 @dataclass
@@ -39,6 +41,18 @@ class Room:
     status: str  # "PUBLIC" | "PRIVATE"
     owner: str
     members: Set[str] = field(default_factory=set)
+
+
+@dataclass
+class UploadSession:
+    transfer_id: str
+    sender: str
+    targets: List[str]
+    safe_name: str
+    size: int
+    remaining: int
+    tmp_path: Path
+    sha: "hashlib._Hash"
 
 
 class ChatServer:
@@ -386,52 +400,9 @@ class ChatServer:
                 return False
             return username in room.members
 
-    def _handle_fileupload(self, sender: str, sock: socket.socket, buffer: bytearray, payload_json: str) -> None:
-        """Recibe bytes y los distribuye en scopes DM/ROOM."""
-        try:
-            meta = json.loads(payload_json)
-        except json.JSONDecodeError:
-            self.send_to(sender, "* (upload) Formato inválido.")
-            return
-
-        targets = meta.get("targets")
-        filename = meta.get("filename")
-        size = meta.get("size")
-
-        if not isinstance(targets, list) or not isinstance(filename, str) or not isinstance(size, int):
-            self.send_to(sender, "* (upload) Datos incompletos.")
-            return
-
-        if size < 0 or size > MAX_FILE_SIZE:
-            self.send_to(sender, f"* (upload) Tamaño inválido o excede el límite ({self._format_size(MAX_FILE_SIZE)}).")
-            return
-
-        safe_name = self._sanitize_filename(filename)
-        # Recibir bytes a tmp
-        tmp_name = f"{int(time.time()*1000)}_{sender}_{safe_name}"
-        tmp_path = self.files_root / "_tmp" / tmp_name
-
-        sha = hashlib.sha256()
-        remaining = size
-        try:
-            with tmp_path.open("wb") as f:
-                while remaining > 0:
-                    chunk = self.read_exact(sock, buffer, min(CHUNK_SIZE, remaining))
-                    f.write(chunk)
-                    sha.update(chunk)
-                    remaining -= len(chunk)
-        except Exception:
-            try:
-                tmp_path.unlink(missing_ok=True)  # type: ignore
-            except Exception:
-                pass
-            self.send_to(sender, "* (upload) Transferencia interrumpida.")
-            return
-
-        digest = sha.hexdigest()
+    def _finalize_uploaded_file(self, sender: str, targets: List[str], safe_name: str, size: int, tmp_path: Path, digest: str) -> None:
         ts = datetime.now(timezone.utc).isoformat()
 
-        # Clasificar destinos
         dm_peers: List[str] = []
         rooms: List[str] = []
         unknown: List[str] = []
@@ -445,7 +416,6 @@ class ChatServer:
             t = t.strip()
             if not t:
                 continue
-
             if t.startswith("@"):
                 u = t[1:]
                 if USERNAME_RE.match(u):
@@ -454,13 +424,9 @@ class ChatServer:
                 else:
                     unknown.append(t)
                 continue
-
-            # si coincide con sala existente, es sala
             if t in room_names:
                 rooms.append(t)
                 continue
-
-            # si no es sala, tratar como usuario
             if USERNAME_RE.match(t):
                 if t != sender:
                     dm_peers.append(t)
@@ -475,34 +441,22 @@ class ChatServer:
 
         if not dm_peers and not rooms:
             self.send_to(sender, "* (upload) No hay destinos válidos.")
-            try:
-                tmp_path.unlink(missing_ok=True)  # type: ignore
-            except Exception:
-                pass
             return
 
-        # Validar rooms (membresía)
         ok_rooms: List[str] = []
         for r in rooms:
             if self._is_room_member(sender, r):
                 ok_rooms.append(r)
             else:
                 self.send_to(sender, f"* (upload) No puedes subir a '{r}': no eres miembro.")
-
         rooms = ok_rooms
 
         if not dm_peers and not rooms:
             self.send_to(sender, "* (upload) No quedó ningún destino permitido.")
-            try:
-                tmp_path.unlink(missing_ok=True)  # type: ignore
-            except Exception:
-                pass
             return
 
-        # Copiar a cada scope y registrar manifest
         human_size = self._format_size(size)
 
-        # DMs
         for peer in dm_peers:
             scope_dir = self._dm_scope_dir(sender, peer)
             stored = self._unique_name(scope_dir, safe_name)
@@ -517,12 +471,9 @@ class ChatServer:
                 "sha256": digest,
                 "ts": ts,
             })
-
-            # Notificar a ambos lados (si están conectados)
             self.send_to(peer, f"[DM de {sender}] (archivo) {sender} mandó '{stored}' ({human_size}). Usa /download {stored} <ruta>")
             self.send_to(sender, f"[DM a {peer}] (archivo) enviado '{stored}' ({human_size}).")
 
-        # Rooms
         for room in rooms:
             scope_dir = self._room_scope_dir(room)
             stored = self._unique_name(scope_dir, safe_name)
@@ -537,15 +488,118 @@ class ChatServer:
                 "sha256": digest,
                 "ts": ts,
             })
-
-            # Notificación en el room (formato compatible con tu parser)
             self.room_broadcast(room, f"[Room:{room}] {sender}: (archivo) mandó '{stored}' ({human_size}). Usa /download {stored} <ruta>", exclude=None)
 
-        # Limpieza tmp
+    def _handle_fileupload_begin(self, sender: str, upload_sessions: Dict[str, UploadSession], payload_json: str) -> None:
         try:
-            tmp_path.unlink(missing_ok=True)  # type: ignore
+            meta = json.loads(payload_json)
+        except json.JSONDecodeError:
+            self.send_to(sender, "* (upload) Formato inválido.")
+            return
+
+        transfer_id = str(meta.get("id", "")).strip()
+        targets = meta.get("targets")
+        filename = meta.get("filename")
+        size = meta.get("size")
+        if not transfer_id or not isinstance(targets, list) or not isinstance(filename, str) or not isinstance(size, int):
+            self.send_to(sender, "* (upload) Datos incompletos.")
+            return
+        if transfer_id in upload_sessions:
+            self.send_to(sender, "* (upload) id de transferencia duplicado.")
+            return
+        if size < 0 or size > MAX_FILE_SIZE:
+            self.send_to(sender, f"* (upload) Tamaño inválido o excede el límite ({self._format_size(MAX_FILE_SIZE)}).")
+            return
+
+        safe_name = self._sanitize_filename(filename)
+        tmp_name = f"{int(time.time()*1000)}_{sender}_{safe_name}"
+        tmp_path = self.files_root / "_tmp" / tmp_name
+        try:
+            tmp_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path.touch()
         except Exception:
-            pass
+            self.send_to(sender, "* (upload) No se pudo preparar el archivo temporal.")
+            return
+
+        upload_sessions[transfer_id] = UploadSession(
+            transfer_id=transfer_id,
+            sender=sender,
+            targets=targets,
+            safe_name=safe_name,
+            size=size,
+            remaining=size,
+            tmp_path=tmp_path,
+            sha=hashlib.sha256(),
+        )
+
+    def _handle_fileupload_chunk(self, sender: str, upload_sessions: Dict[str, UploadSession], payload_json: str) -> None:
+        try:
+            meta = json.loads(payload_json)
+            transfer_id = str(meta.get("id", "")).strip()
+            data_b64 = str(meta.get("data", ""))
+        except Exception:
+            self.send_to(sender, "* (upload) Chunk inválido.")
+            return
+        s = upload_sessions.get(transfer_id)
+        if not s or s.sender != sender:
+            self.send_to(sender, "* (upload) Sesión no encontrada.")
+            return
+        try:
+            data = base64.b64decode(data_b64.encode("ascii"), validate=True)
+        except Exception:
+            self.send_to(sender, "* (upload) Chunk corrupto.")
+            return
+
+        if len(data) > s.remaining:
+            self.send_to(sender, "* (upload) Tamaño excedido.")
+            try:
+                s.tmp_path.unlink(missing_ok=True)  # type: ignore
+            except Exception:
+                pass
+            upload_sessions.pop(transfer_id, None)
+            return
+
+        try:
+            with s.tmp_path.open("ab") as f:
+                f.write(data)
+            s.sha.update(data)
+            s.remaining -= len(data)
+        except Exception:
+            self.send_to(sender, "* (upload) Error escribiendo chunk.")
+            try:
+                s.tmp_path.unlink(missing_ok=True)  # type: ignore
+            except Exception:
+                pass
+            upload_sessions.pop(transfer_id, None)
+
+    def _handle_fileupload_end(self, sender: str, upload_sessions: Dict[str, UploadSession], payload_json: str) -> None:
+        try:
+            meta = json.loads(payload_json)
+            transfer_id = str(meta.get("id", "")).strip()
+        except Exception:
+            self.send_to(sender, "* (upload) END inválido.")
+            return
+
+        s = upload_sessions.pop(transfer_id, None)
+        if not s or s.sender != sender:
+            self.send_to(sender, "* (upload) Sesión no encontrada.")
+            return
+
+        if s.remaining != 0:
+            self.send_to(sender, "* (upload) Transferencia incompleta.")
+            try:
+                s.tmp_path.unlink(missing_ok=True)  # type: ignore
+            except Exception:
+                pass
+            return
+
+        try:
+            self._finalize_uploaded_file(sender, s.targets, s.safe_name, s.size, s.tmp_path, s.sha.hexdigest())
+        finally:
+            try:
+                s.tmp_path.unlink(missing_ok=True)  # type: ignore
+            except Exception:
+                pass
 
     def _handle_fileview(self, requester: str, client: Client, payload_json: str) -> None:
         try:
@@ -663,20 +717,28 @@ class ChatServer:
             self._client_send_direct(client, self._encode_line("FILEERR " + json.dumps(err, ensure_ascii=False)))
             return
 
-        header = {"scope": scope_key, "filename": safe, "size": size}
+        transfer_id = f"down-{int(time.time() * 1000)}-{requester}"
 
-        try:
-            with client.send_lock:
-                client.sock.sendall(self._encode_line("FILEDATA " + json.dumps(header, ensure_ascii=False)))
+        def worker():
+            begin = {"id": transfer_id, "scope": scope_key, "filename": safe, "size": size}
+            client.out_q.put(self._encode_line("FILEDOWNLOADBEGIN " + json.dumps(begin, ensure_ascii=False)))
+            try:
                 with path.open("rb") as f:
                     while True:
-                        chunk = f.read(CHUNK_SIZE)
-                        if not chunk:
+                        raw = f.read(WIRE_CHUNK_SIZE)
+                        if not raw:
                             break
-                        client.sock.sendall(chunk)
-        except OSError:
-            # conexión rota
-            return
+                        row = {
+                            "id": transfer_id,
+                            "data": base64.b64encode(raw).decode("ascii"),
+                        }
+                        client.out_q.put(self._encode_line("FILEDOWNLOADCHUNK " + json.dumps(row, ensure_ascii=False)))
+                client.out_q.put(self._encode_line("FILEDOWNLOADEND " + json.dumps({"id": transfer_id}, ensure_ascii=False)))
+            except Exception:
+                err = {"id": transfer_id, "scope": scope_key, "error": "Descarga interrumpida"}
+                client.out_q.put(self._encode_line("FILEERR " + json.dumps(err, ensure_ascii=False)))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ---------- Writer thread ----------
     def client_writer(self, client: Client) -> None:
@@ -922,6 +984,7 @@ class ChatServer:
     # ---------- Manejo de cliente ----------
     def client_reader(self, sock: socket.socket, addr: Tuple[str, int]) -> None:
         buffer = bytearray()
+        upload_sessions: Dict[str, UploadSession] = {}
         username: Optional[str] = None
         alive = threading.Event()
         alive.set()
@@ -984,9 +1047,19 @@ class ChatServer:
                     break
 
                 # --- Protocolos de archivos (en línea) ---
-                if line.startswith("FILEUPLOAD "):
-                    payload = line[len("FILEUPLOAD "):].strip()
-                    self._handle_fileupload(username, sock, buffer, payload)
+                if line.startswith("FILEUPLOADBEGIN "):
+                    payload = line[len("FILEUPLOADBEGIN "):].strip()
+                    self._handle_fileupload_begin(username, upload_sessions, payload)
+                    continue
+
+                if line.startswith("FILEUPLOADCHUNK "):
+                    payload = line[len("FILEUPLOADCHUNK "):].strip()
+                    self._handle_fileupload_chunk(username, upload_sessions, payload)
+                    continue
+
+                if line.startswith("FILEUPLOADEND "):
+                    payload = line[len("FILEUPLOADEND "):].strip()
+                    self._handle_fileupload_end(username, upload_sessions, payload)
                     continue
 
                 if line.startswith("FILEVIEW "):
@@ -1014,6 +1087,11 @@ class ChatServer:
         except (OSError, ValueError):
             pass
         finally:
+            for s in upload_sessions.values():
+                try:
+                    s.tmp_path.unlink(missing_ok=True)  # type: ignore
+                except Exception:
+                    pass
             if username is not None:
                 self.disconnect(username, reason="salió")
             else:
@@ -1072,4 +1150,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
