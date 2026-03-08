@@ -184,7 +184,7 @@ Para hacer una trasnferencia de archivo, necesitamos usar el comando
 
 Por ejemplo:
 ```
-/upload [Max, Braulio, LasDelireñas_2] ~/Desktop/imagen.png
+/upload [@Max, @Braulio, LasDelireñas_2] ~/Desktop/imagen.png
 ```
 
 Haciendo esto, todos los usuario a los que se haya seleccionado para recivir el archivo tendran permiso de descargar la imagen
