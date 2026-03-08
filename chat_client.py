@@ -73,7 +73,8 @@ class ChatClient:
                     break
                 # Mostramos lo recibido
                 self.safe_print(line)
-        except OSError:
+        except (OSError, ConnectionResetError, ConnectionAbortedError):
+            self.safe_print("\n* (cliente) Error de red: Se perdió la conexión con el servidor.")
             # socket cerrado desde el main
             pass
         finally:
@@ -128,8 +129,8 @@ class ChatClient:
                 if self.sock:
                     try:
                         self.sock.sendall(encode_line(msg))
-                    except OSError:
-                        self.safe_print("* (cliente) Error enviando. ¿Se cayó la conexión?")
+                    except (OSError, BrokenPipeError, ConnectionResetError):
+                        self.safe_print("* (cliente) Error crítico de E/S enviando mensaje. El servidor se desconectó.")
                         break
         finally:
             self.close()

@@ -305,7 +305,7 @@ class ChatServer:
                     continue
                 try:
                     client.sock.sendall(data)
-                except OSError:
+                except (OSError, ConnectionResetError, BrokenPipeError):
                     break
         finally:
             pass
@@ -331,7 +331,7 @@ class ChatServer:
             self.user_active_room.pop(username, None)
 
         # Anunciar en global
-        self.broadcast(f"* {username} {reason}.", exclude=None)
+            self.broadcast(f"[Servidor] {username} {reason}.", exclude=username)
 
         # Anunciar en salas donde sea miembro (sin quitarlo: membresía persiste)
         with self.rooms_lock:
@@ -466,7 +466,7 @@ class ChatServer:
             if cmd == "/all":
                 msg = line[len("/all"):].strip()
                 if msg:
-                    self.broadcast(f"[{sender}] {msg}", exclude=None)
+                    self.broadcast(f"[{sender}] {msg}", exclude=sender)
                 return
 
             if cmd == "/msg":
@@ -546,15 +546,20 @@ class ChatServer:
 
             # Enviar a sala
             self._set_active_room(sender, target)
-            formatted = f"[Room:{target}] {sender}: {msg}"
-            # echo al emisor
-            self.send_to(sender, formatted)
-            # a los demás conectados del room
-            self.room_broadcast(target, formatted, exclude=sender)
+            
+            # Versión para los demás
+            formatted_others = f"[Room:{target}] {sender}: {msg}"
+            # Versión para ti mismo
+            formatted_self = f"[Room:{target}] Tú: {msg}"
+            
+            # Echo al emisor con "Tú"
+            self.send_to(sender, formatted_self)
+            # A los demás conectados del room
+            self.room_broadcast(target, formatted_others, exclude=sender)
             return
 
         # Broadcast global por defecto
-        self.broadcast(f"[{sender}] {line}", exclude=None)
+        self.broadcast(f"[{sender}] {line}", exclude=sender)
 
     # ---------- Manejo de cliente ----------
     def client_reader(self, sock: socket.socket, addr: Tuple[str, int]) -> None:
@@ -627,11 +632,11 @@ class ChatServer:
                     self.handle_message(username, line)
                 except Exception:
                     self.send_to(username, "* Error procesando tu mensaje.")
-        except (OSError, ValueError):
+        except (OSError, ValueError, ConnectionResetError, ConnectionAbortedError):
             pass
         finally:
             if username is not None:
-                self.disconnect(username, reason="salió")
+                self.disconnect(username, reason="perdió la conexión abruptamente")
             else:
                 try:
                     sock.close()
@@ -647,6 +652,9 @@ class ChatServer:
         srv.settimeout(1.0)
 
         print(f"Servidor escuchando en {self.host}:{self.port}")
+        # Arrancamos el hilo fantasma que actualiza las TUIs cada 3 segundos
+        updater_t = threading.Thread(target=self.global_auto_updater, daemon=True)
+        updater_t.start()
         try:
             while not self.stop_event.is_set():
                 try:
@@ -676,6 +684,26 @@ class ChatServer:
 
             print("Servidor cerrado.")
 
+    def global_auto_updater(self) -> None:
+        """
+        Hilo fantasma que reparte aguacate (la lista de usuarios/salas actualizada)
+        a todos los clientes cada 3 segundos.
+        """
+        while not self.stop_event.is_set():
+            # 3 segundos es un buen balance entre rapidez y no saturar la red
+            self.stop_event.wait(3.0) 
+            if self.stop_event.is_set():
+                break
+                
+            with self.clients_lock:
+                current_users = list(self.clients.keys())
+                
+            for user in current_users:
+                try:
+                    # Como cada quien ve distintas salas privadas, mandamos su menú personalizado
+                    self.send_to(user, self._format_rooms_for_who(user))
+                except Exception:
+                    pass
 
 def main():
     ap = argparse.ArgumentParser(description="Servidor de chat (TCP + threads + rooms)")
