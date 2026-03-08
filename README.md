@@ -177,6 +177,13 @@ Por ejemplo
 Podemos realizar transferencia de archivos a chats directos o chats publicos/privados
 Para hacer una trasnferencia de archivo, necesitamos usar el comando 
 
+# IMPORTANTE!!!
+Para poder realizar la transferencia axitosamente con este nuevo servidor, es **MUY IMPORTANTE** ejecutar el servidor usando este **NUEVO** comando:
+```
+python3 chat_server.py --port 5050 --files server_files
+```
+Ya que esto ejecutara el servidor de imagenes, **SIN ESTO** **NO** se podra ejecutar la trasnferencia de archivos 
+
 ### Subir archivo
 ```
 /upload [NICK_1, NICK_2, «PRIVATE_ROOM», «PUBLIC_ROOM»] ~/direccion_del_archivo.extension
