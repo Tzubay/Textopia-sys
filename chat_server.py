@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
+import json
+import os
 import queue
 import re
+import shutil
 import socket
 import threading
+import time
 from dataclasses import dataclass, field
-from typing import Dict, Tuple, Optional, Set, List
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Tuple, Optional, Set, List, Any
 
-USERNAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-]{0,19}$")  # 1..20
-ROOMNAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-]{0,19}$")  # 1..20
-MAX_LINE = 8192  # bytes por línea (anti-abuso simple)
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-]{0,19}$")  # 1..20 chars
+ROOMNAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-]{0,19}$")  # 1..20 chars
+MAX_LINE = 8192
+
+# --- File transfer safeguards ---
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB (ajusta si quieres)
+CHUNK_SIZE = 64 * 1024
 
 
 @dataclass
@@ -19,6 +30,7 @@ class Client:
     addr: Tuple[str, int]
     out_q: "queue.Queue[bytes]"
     alive: threading.Event
+    send_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 @dataclass
@@ -26,11 +38,11 @@ class Room:
     name: str
     status: str  # "PUBLIC" | "PRIVATE"
     owner: str
-    members: Set[str] = field(default_factory=set)  # usernames (pueden estar offline)
+    members: Set[str] = field(default_factory=set)
 
 
 class ChatServer:
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str, port: int, files_root: str = "server_files"):
         self.host = host
         self.port = port
 
@@ -40,40 +52,26 @@ class ChatServer:
         self.rooms: Dict[str, Room] = {}
         self.rooms_lock = threading.RLock()
 
-        # “Sala activa” por usuario (para /invite sin room y /quitroom sin args)
         self.user_active_room: Dict[str, str] = {}
         self.user_ctx_lock = threading.RLock()
 
         self.stop_event = threading.Event()
 
-    # ---------- Utilidades ----------
+        self.files_root = Path(files_root)
+        (self.files_root / "_tmp").mkdir(parents=True, exist_ok=True)
+        (self.files_root / "dms").mkdir(parents=True, exist_ok=True)
+        (self.files_root / "rooms").mkdir(parents=True, exist_ok=True)
+
+    # ---------- Utilidades de envío ----------
     @staticmethod
     def _encode_line(text: str) -> bytes:
         return (text.rstrip("\r\n") + "\n").encode("utf-8", errors="replace")
 
-    @staticmethod
-    def _parse_bracket_list(s: str) -> List[str]:
-        """
-        Acepta: "[a,b,c]" o "a,b,c" o "[a, b, c]"
-        Devuelve lista limpia sin vacíos.
-        """
-        s = s.strip()
-        if s.startswith("[") and s.endswith("]"):
-            s = s[1:-1].strip()
-        if not s:
-            return []
-        parts = [p.strip() for p in s.split(",")]
-        return [p for p in parts if p]
+    def _client_send_direct(self, client: Client, payload: bytes) -> None:
+        """Envío directo (respeta send_lock para no mezclar con writer)."""
+        with client.send_lock:
+            client.sock.sendall(payload)
 
-    def _set_active_room(self, username: str, room: str) -> None:
-        with self.user_ctx_lock:
-            self.user_active_room[username] = room
-
-    def _get_active_room(self, username: str) -> Optional[str]:
-        with self.user_ctx_lock:
-            return self.user_active_room.get(username)
-
-    # ---------- Envío ----------
     def send_to(self, username: str, text: str) -> bool:
         with self.clients_lock:
             c = self.clients.get(username)
@@ -91,10 +89,6 @@ class ChatServer:
                 c.out_q.put(payload)
 
     def room_broadcast(self, room_name: str, text: str, exclude: Optional[str] = None) -> None:
-        """
-        Envía a todos los miembros *conectados* de la sala.
-        La membresía puede incluir offline; se filtra por self.clients.
-        """
         payload = self._encode_line(text)
         with self.rooms_lock:
             room = self.rooms.get(room_name)
@@ -115,7 +109,7 @@ class ChatServer:
             users = sorted(self.clients.keys())
         return ", ".join(users) if users else "(nadie)"
 
-    # ---------- Sockets: lectura por líneas ----------
+    # ---------- Lectura por líneas (buffered) ----------
     @staticmethod
     def recv_line(sock: socket.socket, buffer: bytearray) -> Optional[str]:
         while True:
@@ -134,15 +128,46 @@ class ChatServer:
             if len(buffer) > MAX_LINE * 2:
                 raise ValueError("Buffer demasiado grande")
 
-    # ---------- Rooms: helpers ----------
-    def _room_visible_to(self, room: Room, username: str) -> bool:
-        if room.status == "PUBLIC":
-            return True
-        return username in room.members
+    @staticmethod
+    def read_exact(sock: socket.socket, buffer: bytearray, n: int) -> bytes:
+        """Lee exactamente n bytes, consumiendo primero de buffer."""
+        out = bytearray()
+        if n <= 0:
+            return b""
 
-    def _room_exists(self, name: str) -> bool:
-        with self.rooms_lock:
-            return name in self.rooms
+        # Consumir del buffer residual primero
+        if buffer:
+            take = min(len(buffer), n)
+            out += buffer[:take]
+            del buffer[:take]
+            n -= take
+
+        while n > 0:
+            chunk = sock.recv(min(65536, n))
+            if not chunk:
+                raise ConnectionError("Socket cerrado durante transferencia")
+            out += chunk
+            n -= len(chunk)
+        return bytes(out)
+
+    # ---------- Rooms: helpers ----------
+    def _set_active_room(self, username: str, room: str) -> None:
+        with self.user_ctx_lock:
+            self.user_active_room[username] = room
+
+    def _get_active_room(self, username: str) -> Optional[str]:
+        with self.user_ctx_lock:
+            return self.user_active_room.get(username)
+
+    @staticmethod
+    def _parse_bracket_list(s: str) -> List[str]:
+        s = s.strip()
+        if s.startswith("[") and s.endswith("]"):
+            s = s[1:-1].strip()
+        if not s:
+            return []
+        parts = [p.strip() for p in s.split(",")]
+        return [p for p in parts if p]
 
     def _create_room(self, owner: str, name: str, status: str, invitees: List[str]) -> str:
         status = status.upper()
@@ -163,7 +188,6 @@ class ChatServer:
             room = Room(name=name, status=status, owner=owner)
             room.members.add(owner)
 
-            # Invitados (pueden estar offline, pero deben tener nick válido)
             added = []
             skipped_self = False
             invalids = []
@@ -179,19 +203,15 @@ class ChatServer:
 
             self.rooms[name] = room
 
-        # Notificar
         self._set_active_room(owner, name)
         self.send_to(owner, f"* Sala creada: {name} ({status}). Owner: {owner}. Miembros: {len(room.members)}")
         if skipped_self:
             self.send_to(owner, "* Nota: te omití de la lista de invitación porque ya eres el creador.")
-
         if invalids:
             self.send_to(owner, f"* Invitados ignorados por nick inválido: {', '.join(invalids)}")
 
-        # Avisar a invitados conectados
         for u in added:
-            if self.send_to(u, f"* Te agregaron a la sala '{name}' ({status}) por {owner}. Envia: @{name} tu mensaje"):
-                pass
+            self.send_to(u, f"* Te agregaron a la sala '{name}' ({status}) por {owner}. Envia: @{name} tu mensaje")
 
         return "* OK"
 
@@ -221,12 +241,10 @@ class ChatServer:
             room.members.remove(username)
             remaining = len(room.members)
 
-            # Si queda vacía, se borra
             if remaining == 0:
                 del self.rooms[room_name]
                 return f"* Saliste de '{room_name}' y la sala se eliminó (quedó vacía)."
 
-        # Notificar a conectados de esa sala
         self.room_broadcast(room_name, f"* {username} salió permanentemente de la sala {room_name}.", exclude=None)
         return f"* Saliste permanentemente de '{room_name}'."
 
@@ -260,15 +278,9 @@ class ChatServer:
         if not added:
             return "* Nadie nuevo fue agregado (ya estaban o eran inválidos)."
 
-        # Notificar a invitados (si están conectados)
         for u in added:
-            if self.send_to(u, f"* Te agregaron a la sala '{room_name}' ({room.status}) por {inviter}. Envia: @{room_name} ..."):
-                pass
-            else:
-                # offline: no pasa nada, pero queda como miembro para cuando se conecte con ese nick
-                pass
+            self.send_to(u, f"* Te agregaron a la sala '{room_name}' ({room.status}) por {inviter}. Envia: @{room_name} ...")
 
-        # Notificar a conectados del room (opcional, solo si quieres)
         self.room_broadcast(room_name, f"* {inviter} agregó a: {', '.join(added)}", exclude=None)
         return "* OK"
 
@@ -295,6 +307,377 @@ class ChatServer:
             parts.append(f"* Sala activa: {ar}")
         return "\n".join(parts)
 
+    # ---------- File transfer helpers ----------
+    @staticmethod
+    def _sanitize_filename(name: str) -> str:
+        # quedarnos con basename y reemplazar caracteres raros
+        name = os.path.basename(name)
+        if not name:
+            return "file"
+        # permitir letras, números, espacio, _, -, ., y paréntesis
+        safe = []
+        for ch in name:
+            if ch.isalnum() or ch in " _-().,[]":
+                safe.append(ch)
+            elif ch in "/\\":
+                continue
+            else:
+                safe.append("_")
+        out = "".join(safe).strip()
+        return out[:120] if out else "file"
+
+    @staticmethod
+    def _format_size(n: int) -> str:
+        # formato humano simple
+        units = ["B", "KB", "MB", "GB"]
+        v = float(n)
+        for u in units:
+            if v < 1024.0 or u == units[-1]:
+                if u == "B":
+                    return f"{int(v)} {u}"
+                return f"{v:.1f} {u}"
+            v /= 1024.0
+        return f"{n} B"
+
+    def _dm_scope_dir(self, a: str, b: str) -> Path:
+        x, y = sorted([a, b])
+        return self.files_root / "dms" / f"{x}__{y}"
+
+    def _room_scope_dir(self, room: str) -> Path:
+        return self.files_root / "rooms" / room
+
+    def _unique_name(self, folder: Path, filename: str) -> str:
+        folder.mkdir(parents=True, exist_ok=True)
+        base = filename
+        stem, ext = os.path.splitext(base)
+        candidate = base
+        k = 1
+        while (folder / candidate).exists():
+            k += 1
+            candidate = f"{stem}({k}){ext}"
+        return candidate
+
+    def _append_manifest(self, folder: Path, entry: Dict[str, Any]) -> None:
+        folder.mkdir(parents=True, exist_ok=True)
+        mf = folder / "manifest.jsonl"
+        with mf.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def _read_manifest(self, folder: Path) -> List[Dict[str, Any]]:
+        mf = folder / "manifest.jsonl"
+        if not mf.exists():
+            return []
+        out: List[Dict[str, Any]] = []
+        with mf.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return out
+
+    def _is_room_member(self, username: str, room_name: str) -> bool:
+        with self.rooms_lock:
+            room = self.rooms.get(room_name)
+            if not room:
+                return False
+            return username in room.members
+
+    def _handle_fileupload(self, sender: str, sock: socket.socket, buffer: bytearray, payload_json: str) -> None:
+        """Recibe bytes y los distribuye en scopes DM/ROOM."""
+        try:
+            meta = json.loads(payload_json)
+        except json.JSONDecodeError:
+            self.send_to(sender, "* (upload) Formato inválido.")
+            return
+
+        targets = meta.get("targets")
+        filename = meta.get("filename")
+        size = meta.get("size")
+
+        if not isinstance(targets, list) or not isinstance(filename, str) or not isinstance(size, int):
+            self.send_to(sender, "* (upload) Datos incompletos.")
+            return
+
+        if size < 0 or size > MAX_FILE_SIZE:
+            self.send_to(sender, f"* (upload) Tamaño inválido o excede el límite ({self._format_size(MAX_FILE_SIZE)}).")
+            return
+
+        safe_name = self._sanitize_filename(filename)
+        # Recibir bytes a tmp
+        tmp_name = f"{int(time.time()*1000)}_{sender}_{safe_name}"
+        tmp_path = self.files_root / "_tmp" / tmp_name
+
+        sha = hashlib.sha256()
+        remaining = size
+        try:
+            with tmp_path.open("wb") as f:
+                while remaining > 0:
+                    chunk = self.read_exact(sock, buffer, min(CHUNK_SIZE, remaining))
+                    f.write(chunk)
+                    sha.update(chunk)
+                    remaining -= len(chunk)
+        except Exception:
+            try:
+                tmp_path.unlink(missing_ok=True)  # type: ignore
+            except Exception:
+                pass
+            self.send_to(sender, "* (upload) Transferencia interrumpida.")
+            return
+
+        digest = sha.hexdigest()
+        ts = datetime.now(timezone.utc).isoformat()
+
+        # Clasificar destinos
+        dm_peers: List[str] = []
+        rooms: List[str] = []
+        unknown: List[str] = []
+
+        with self.rooms_lock:
+            room_names = set(self.rooms.keys())
+
+        for t in targets:
+            if not isinstance(t, str):
+                continue
+            t = t.strip()
+            if not t:
+                continue
+
+            if t.startswith("@"):
+                u = t[1:]
+                if USERNAME_RE.match(u):
+                    if u != sender:
+                        dm_peers.append(u)
+                else:
+                    unknown.append(t)
+                continue
+
+            # si coincide con sala existente, es sala
+            if t in room_names:
+                rooms.append(t)
+                continue
+
+            # si no es sala, tratar como usuario
+            if USERNAME_RE.match(t):
+                if t != sender:
+                    dm_peers.append(t)
+            else:
+                unknown.append(t)
+
+        dm_peers = sorted(set(dm_peers))
+        rooms = sorted(set(rooms))
+
+        if unknown:
+            self.send_to(sender, f"* (upload) Destinos ignorados (inválidos/no existen): {', '.join(unknown)}")
+
+        if not dm_peers and not rooms:
+            self.send_to(sender, "* (upload) No hay destinos válidos.")
+            try:
+                tmp_path.unlink(missing_ok=True)  # type: ignore
+            except Exception:
+                pass
+            return
+
+        # Validar rooms (membresía)
+        ok_rooms: List[str] = []
+        for r in rooms:
+            if self._is_room_member(sender, r):
+                ok_rooms.append(r)
+            else:
+                self.send_to(sender, f"* (upload) No puedes subir a '{r}': no eres miembro.")
+
+        rooms = ok_rooms
+
+        if not dm_peers and not rooms:
+            self.send_to(sender, "* (upload) No quedó ningún destino permitido.")
+            try:
+                tmp_path.unlink(missing_ok=True)  # type: ignore
+            except Exception:
+                pass
+            return
+
+        # Copiar a cada scope y registrar manifest
+        human_size = self._format_size(size)
+
+        # DMs
+        for peer in dm_peers:
+            scope_dir = self._dm_scope_dir(sender, peer)
+            stored = self._unique_name(scope_dir, safe_name)
+            shutil.copy2(tmp_path, scope_dir / stored)
+            self._append_manifest(scope_dir, {
+                "stored": stored,
+                "original": safe_name,
+                "from": sender,
+                "to": peer,
+                "kind": "DM",
+                "size": size,
+                "sha256": digest,
+                "ts": ts,
+            })
+
+            # Notificar a ambos lados (si están conectados)
+            self.send_to(peer, f"[DM de {sender}] (archivo) {sender} mandó '{stored}' ({human_size}). Usa /download {stored} <ruta>")
+            self.send_to(sender, f"[DM a {peer}] (archivo) enviado '{stored}' ({human_size}).")
+
+        # Rooms
+        for room in rooms:
+            scope_dir = self._room_scope_dir(room)
+            stored = self._unique_name(scope_dir, safe_name)
+            shutil.copy2(tmp_path, scope_dir / stored)
+            self._append_manifest(scope_dir, {
+                "stored": stored,
+                "original": safe_name,
+                "from": sender,
+                "room": room,
+                "kind": "ROOM",
+                "size": size,
+                "sha256": digest,
+                "ts": ts,
+            })
+
+            # Notificación en el room (formato compatible con tu parser)
+            self.room_broadcast(room, f"[Room:{room}] {sender}: (archivo) mandó '{stored}' ({human_size}). Usa /download {stored} <ruta>", exclude=None)
+
+        # Limpieza tmp
+        try:
+            tmp_path.unlink(missing_ok=True)  # type: ignore
+        except Exception:
+            pass
+
+    def _handle_fileview(self, requester: str, client: Client, payload_json: str) -> None:
+        try:
+            meta = json.loads(payload_json)
+        except json.JSONDecodeError:
+            self.send_to(requester, "* (viewfiles) Formato inválido.")
+            return
+
+        kind = str(meta.get("kind", "")).upper()
+        limit = meta.get("limit", 0)
+        if not isinstance(limit, int) or limit < 0:
+            limit = 0
+
+        scope_key = ""
+        folder: Optional[Path] = None
+
+        if kind == "ROOM":
+            room = meta.get("room")
+            if not isinstance(room, str) or not room:
+                self.send_to(requester, "* (viewfiles) Falta room.")
+                return
+            if not self._is_room_member(requester, room):
+                self.send_to(requester, "* (viewfiles) No eres miembro de esa sala.")
+                return
+            scope_key = f"ROOM:{room}"
+            folder = self._room_scope_dir(room)
+
+        elif kind == "DM":
+            peer = meta.get("peer")
+            if not isinstance(peer, str) or not peer:
+                self.send_to(requester, "* (viewfiles) Falta peer.")
+                return
+            if not USERNAME_RE.match(peer) or peer == requester:
+                self.send_to(requester, "* (viewfiles) peer inválido.")
+                return
+            scope_key = f"DM:{peer}"
+            folder = self._dm_scope_dir(requester, peer)
+
+        else:
+            self.send_to(requester, "* (viewfiles) kind inválido.")
+            return
+
+        items = self._read_manifest(folder)
+        if limit > 0:
+            items = items[-limit:]
+
+        # Responder como protocolo para que el cliente lo ponga en la conversación correcta
+        begin = {"scope": scope_key, "count": len(items)}
+        self._client_send_direct(client, self._encode_line("FILELISTBEGIN " + json.dumps(begin, ensure_ascii=False)))
+
+        for it in items:
+            row = {
+                "scope": scope_key,
+                "filename": it.get("stored"),
+                "size": it.get("size"),
+                "from": it.get("from"),
+                "ts": it.get("ts"),
+            }
+            self._client_send_direct(client, self._encode_line("FILEITEM " + json.dumps(row, ensure_ascii=False)))
+
+        self._client_send_direct(client, self._encode_line("FILELISTEND " + json.dumps({"scope": scope_key}, ensure_ascii=False)))
+
+    def _handle_filedownload(self, requester: str, client: Client, payload_json: str) -> None:
+        try:
+            meta = json.loads(payload_json)
+        except json.JSONDecodeError:
+            self.send_to(requester, "* (download) Formato inválido.")
+            return
+
+        kind = str(meta.get("kind", "")).upper()
+        filename = meta.get("filename")
+        if not isinstance(filename, str) or not filename:
+            self.send_to(requester, "* (download) Falta filename.")
+            return
+
+        folder: Optional[Path] = None
+        scope_key = ""
+
+        if kind == "ROOM":
+            room = meta.get("room")
+            if not isinstance(room, str) or not room:
+                self.send_to(requester, "* (download) Falta room.")
+                return
+            if not self._is_room_member(requester, room):
+                self.send_to(requester, "* (download) No eres miembro de esa sala.")
+                return
+            folder = self._room_scope_dir(room)
+            scope_key = f"ROOM:{room}"
+
+        elif kind == "DM":
+            peer = meta.get("peer")
+            if not isinstance(peer, str) or not peer:
+                self.send_to(requester, "* (download) Falta peer.")
+                return
+            if not USERNAME_RE.match(peer) or peer == requester:
+                self.send_to(requester, "* (download) peer inválido.")
+                return
+            folder = self._dm_scope_dir(requester, peer)
+            scope_key = f"DM:{peer}"
+
+        else:
+            self.send_to(requester, "* (download) kind inválido.")
+            return
+
+        safe = self._sanitize_filename(filename)
+        path = folder / safe
+        if not path.exists() or not path.is_file():
+            err = {"scope": scope_key, "error": "Archivo no existe"}
+            self._client_send_direct(client, self._encode_line("FILEERR " + json.dumps(err, ensure_ascii=False)))
+            return
+
+        size = path.stat().st_size
+        if size > MAX_FILE_SIZE:
+            err = {"scope": scope_key, "error": "Archivo excede límite del servidor"}
+            self._client_send_direct(client, self._encode_line("FILEERR " + json.dumps(err, ensure_ascii=False)))
+            return
+
+        header = {"scope": scope_key, "filename": safe, "size": size}
+
+        try:
+            with client.send_lock:
+                client.sock.sendall(self._encode_line("FILEDATA " + json.dumps(header, ensure_ascii=False)))
+                with path.open("rb") as f:
+                    while True:
+                        chunk = f.read(CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        client.sock.sendall(chunk)
+        except OSError:
+            # conexión rota
+            return
+
     # ---------- Writer thread ----------
     def client_writer(self, client: Client) -> None:
         try:
@@ -304,7 +687,8 @@ class ChatServer:
                 except queue.Empty:
                     continue
                 try:
-                    client.sock.sendall(data)
+                    with client.send_lock:
+                        client.sock.sendall(data)
                 except OSError:
                     break
         finally:
@@ -312,7 +696,6 @@ class ChatServer:
 
     # ---------- Disconnect ----------
     def disconnect(self, username: str, reason: str = "desconectado") -> None:
-        # Cerrar socket/cliente
         with self.clients_lock:
             client = self.clients.pop(username, None)
 
@@ -330,25 +713,20 @@ class ChatServer:
         with self.user_ctx_lock:
             self.user_active_room.pop(username, None)
 
-        # Anunciar en global
         self.broadcast(f"* {username} {reason}.", exclude=None)
 
-        # Anunciar en salas donde sea miembro (sin quitarlo: membresía persiste)
         with self.rooms_lock:
             room_names = [r.name for r in self.rooms.values() if username in r.members]
         for rn in room_names:
             self.room_broadcast(rn, f"* {username} se desconectó (sigue siendo miembro).", exclude=None)
 
-    # ---------- Parsing / comandos ----------
+    # ---------- Comandos rooms ----------
     def _handle_room_command(self, sender: str, line: str) -> None:
-        # Formato esperado:
-        # /room [a,b,c] name Amigos status PRIVATE
         rest = line[len("/room"):].strip()
         if not rest:
             self.send_to(sender, "* Uso: /room [nick2,nick3] name <Sala> status <PUBLIC|PRIVATE>")
             return
 
-        # Extraer lista en []
         invitees: List[str] = []
         if "[" in rest and "]" in rest:
             lb = rest.find("[")
@@ -359,7 +737,6 @@ class ChatServer:
         else:
             rest2 = rest
 
-        # Buscar name y status (orden fijo: name X status Y)
         m = re.search(r"\bname\s+(\S+)\s+status\s+(PUBLIC|PRIVATE)\b", rest2, re.IGNORECASE)
         if not m:
             self.send_to(sender, "* Uso: /room [nick2,nick3] name <Sala> status <PUBLIC|PRIVATE>")
@@ -372,10 +749,6 @@ class ChatServer:
         self.send_to(sender, msg)
 
     def _handle_invite_command(self, sender: str, line: str) -> None:
-        # Acepta:
-        # /invite [a,b] room Amigos
-        # /invite nick room Amigos
-        # /invite [a,b]            (usa sala activa)
         rest = line[len("/invite"):].strip()
         if not rest:
             self.send_to(sender, "* Uso: /invite [nick] room <Sala>  (o sin room usa tu sala activa)")
@@ -384,7 +757,6 @@ class ChatServer:
         invitees: List[str] = []
         room_name: Optional[str] = None
 
-        # Caso lista []
         if rest.startswith("["):
             rb = rest.find("]")
             if rb == -1:
@@ -398,7 +770,6 @@ class ChatServer:
             invitees = [parts[0].strip("[]")]
             tail = " ".join(parts[1:]).strip()
 
-        # room opcional
         m = re.search(r"\broom\s+(\S+)\b", tail, re.IGNORECASE)
         if m:
             room_name = m.group(1).strip()
@@ -440,17 +811,16 @@ class ChatServer:
         msg = self._quit_room(sender, room_name)
         self.send_to(sender, msg)
 
-        # si su sala activa era esa, limpiar
         if self._get_active_room(sender) == room_name:
             with self.user_ctx_lock:
                 self.user_active_room.pop(sender, None)
 
+    # ---------- Mensajes ----------
     def handle_message(self, sender: str, line: str) -> None:
         line = line.strip()
         if not line:
             return
 
-        # Comandos
         if line.startswith("/"):
             cmd = line.split(maxsplit=1)[0].lower()
 
@@ -461,6 +831,7 @@ class ChatServer:
             if cmd == "/help":
                 self.send_to(sender, "* Comandos: /who, /msg <user> <msg>, /all <msg>, /room [...], /invite [...], /intro <Sala>, /quitroom <Sala>, /help")
                 self.send_to(sender, "* DM: @usuario mensaje   | Sala: @Sala mensaje")
+                self.send_to(sender, "* Archivos (cliente TUI): /upload [...], /download <archivo> <ruta>, /viewfiles [N]")
                 return
 
             if cmd == "/all":
@@ -512,7 +883,6 @@ class ChatServer:
             target = parts[0][1:]
             msg = parts[1]
 
-            # Prioridad: si hay usuario conectado con ese nombre => DM
             with self.clients_lock:
                 is_user = target in self.clients
 
@@ -526,7 +896,6 @@ class ChatServer:
                     self.send_to(sender, f"[DM a {target}] {msg}")
                 return
 
-            # Si no es usuario, intentar sala
             with self.rooms_lock:
                 room = self.rooms.get(target)
 
@@ -534,26 +903,20 @@ class ChatServer:
                 self.send_to(sender, f"* No existe usuario conectado ni sala llamada '{target}'.")
                 return
 
-            # Ver membresía / acceso
             if room.status == "PRIVATE" and sender not in room.members:
                 self.send_to(sender, f"* La sala '{target}' es PRIVATE y no eres miembro.")
                 return
 
-            # En PUBLIC, si no eres miembro todavía, exige /intro (para que sea claro)
             if room.status == "PUBLIC" and sender not in room.members:
                 self.send_to(sender, f"* No estás en '{target}'. Entra con: /intro {target}")
                 return
 
-            # Enviar a sala
             self._set_active_room(sender, target)
             formatted = f"[Room:{target}] {sender}: {msg}"
-            # echo al emisor
             self.send_to(sender, formatted)
-            # a los demás conectados del room
             self.room_broadcast(target, formatted, exclude=sender)
             return
 
-        # Broadcast global por defecto
         self.broadcast(f"[{sender}] {line}", exclude=None)
 
     # ---------- Manejo de cliente ----------
@@ -567,7 +930,7 @@ class ChatServer:
         try:
             sock.settimeout(30.0)
             sock.sendall(self._encode_line("* Bienvenido. Escribe: NICK tu_nombre"))
-            # Handshake NICK
+
             while not self.stop_event.is_set():
                 line = self.recv_line(sock, buffer)
                 if line is None:
@@ -590,43 +953,64 @@ class ChatServer:
                         client = Client(username=username, sock=sock, addr=addr, out_q=out_q, alive=alive)
                         self.clients[username] = client
 
-                    # Ya registrado: arrancamos writer
                     writer_t = threading.Thread(target=self.client_writer, args=(client,), daemon=True)
                     writer_t.start()
 
-                    # Mensajes iniciales
                     self.send_to(username, f"* Conectado como '{username}'. Escribe /help para comandos.")
                     self.broadcast(f"* {username} se unió al chat.", exclude=username)
 
-                    # Si ya pertenece a salas (por invitación offline), avísale
                     with self.rooms_lock:
                         my_rooms = [r.name for r in self.rooms.values() if username in r.members]
                     if my_rooms:
                         self.send_to(username, f"* Ya eres miembro de: {', '.join(sorted(my_rooms))}")
-                        # opcional: set active al primero
                         self._set_active_room(username, sorted(my_rooms)[0])
 
                     break
                 else:
                     sock.sendall(self._encode_line("* Primero define tu nombre: NICK tu_nombre"))
-                    continue
 
             if username is None:
                 return
 
-            # Loop normal
             sock.settimeout(1.0)
+
             while alive.is_set() and not self.stop_event.is_set():
                 try:
                     line = self.recv_line(sock, buffer)
                 except socket.timeout:
                     continue
+
                 if line is None:
                     break
+
+                # --- Protocolos de archivos (en línea) ---
+                if line.startswith("FILEUPLOAD "):
+                    payload = line[len("FILEUPLOAD "):].strip()
+                    self._handle_fileupload(username, sock, buffer, payload)
+                    continue
+
+                if line.startswith("FILEVIEW "):
+                    payload = line[len("FILEVIEW "):].strip()
+                    with self.clients_lock:
+                        c = self.clients.get(username)
+                    if c:
+                        self._handle_fileview(username, c, payload)
+                    continue
+
+                if line.startswith("FILEDOWNLOAD "):
+                    payload = line[len("FILEDOWNLOAD "):].strip()
+                    with self.clients_lock:
+                        c = self.clients.get(username)
+                    if c:
+                        self._handle_filedownload(username, c, payload)
+                    continue
+
+                # Mensaje normal
                 try:
                     self.handle_message(username, line)
                 except Exception:
                     self.send_to(username, "* Error procesando tu mensaje.")
+
         except (OSError, ValueError):
             pass
         finally:
@@ -668,7 +1052,6 @@ class ChatServer:
             except OSError:
                 pass
 
-            # Cierra clientes
             with self.clients_lock:
                 users = list(self.clients.keys())
             for u in users:
@@ -678,13 +1061,15 @@ class ChatServer:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Servidor de chat (TCP + threads + rooms)")
+    ap = argparse.ArgumentParser(description="Servidor de chat (TCP + threads + rooms + file transfer)")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=5050)
+    ap.add_argument("--files", default="server_files", help="Carpeta raíz para archivos")
     args = ap.parse_args()
 
-    ChatServer(args.host, args.port).serve_forever()
+    ChatServer(args.host, args.port, files_root=args.files).serve_forever()
 
 
 if __name__ == "__main__":
     main()
+
