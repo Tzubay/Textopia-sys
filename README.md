@@ -173,6 +173,50 @@ Por ejemplo
 /quitroom Las_Delireñas2
 ```
 
+## trasnferencia de archivos en chat
+Podemos realizar transferencia de archivos a chats directos o chats publicos/privados
+Para hacer una trasnferencia de archivo, necesitamos usar el comando 
+
+### Subir archivo
+```
+/upload [NICK_1, NICK_2, «PRIVATE_ROOM», «PUBLIC_ROOM»] ~/direccion_del_archivo.extension
+```
+
+Por ejemplo:
+```
+/upload [Max, Braulio, LasDelireñas_2] ~/Desktop/imagen.png
+```
+
+Haciendo esto, todos los usuario a los que se haya seleccionado para recivir el archivo tendran permiso de descargar la imagen
+Los usuarios que no son miembros del grupo NO podran acceder al recurso (En este caso, Max, Braulio, y los miembros de  LasDelireñas_2 si podran descargarlo)
+ Para 
+
+### Descargar archivo
+Para descargar un archivo, necesitas realizar el comando:
+
+```
+/download «archivo.extencion» «ruta destino del archivo»
+```
+
+Por ejemplo: 
+```
+/download meme.png ~/Desktop/memes/
+```
+
+Dentro del Cliente, si quieres ver todos los archivos enviados a una conversación, puedes usar el comando 
+
+```
+/viewfiles
+```
+Y mostrara los archivos que puedes descargar, con metadata sobre quien envio el archivo
+
+El comando ***/viewfiles*** puede venir acompañado de 1 numero, el cual mostrar el lps archivos emviados hasta ese numero
+Por ejemplo 
+```
+/viewfiles 5
+```
+Mostrara los **ultimos** 5 archivos enviados al chat (si es que existen, si no llega a 5 archivos, solo veran hasta el numero de archivos existentes)
+
 ## Para mas informacion 
 Estos son los comandos mas basicos, pero hay mas, puedes usar el comando ***/help*** para obtener mas información sobre los comandos
 ```
