@@ -466,7 +466,7 @@ class ChatServer:
             if cmd == "/all":
                 msg = line[len("/all"):].strip()
                 if msg:
-                    self.broadcast(f"[{sender}] {msg}", exclude=sender)
+                    self.broadcast(f"[{sender}] {msg}")
                 return
 
             if cmd == "/msg":
@@ -547,19 +547,15 @@ class ChatServer:
             # Enviar a sala
             self._set_active_room(sender, target)
             
-            # Versión para los demás
-            formatted_others = f"[Room:{target}] {sender}: {msg}"
-            # Versión para ti mismo
-            formatted_self = f"[Room:{target}] Tú: {msg}"
+            # Versión universal para todos (la web usa tu nick real para alinear a la derecha)
+            formatted_msg = f"[Room:{target}] {sender}: {msg}"
             
-            # Echo al emisor con "Tú"
-            self.send_to(sender, formatted_self)
-            # A los demás conectados del room
-            self.room_broadcast(target, formatted_others, exclude=sender)
+            # Enviar a toda la sala parejo (incluyendo al que lo mandó)
+            self.room_broadcast(target, formatted_msg)
             return
 
         # Broadcast global por defecto
-        self.broadcast(f"[{sender}] {line}", exclude=sender)
+        self.broadcast(f"[{sender}] {line}")
 
     # ---------- Manejo de cliente ----------
     def client_reader(self, sock: socket.socket, addr: Tuple[str, int]) -> None:

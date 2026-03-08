@@ -68,8 +68,25 @@ async def handle_ws_client(websocket):
         finally:
             writer.close()
 
-    # Corre ambas direcciones en paralelo
-    await asyncio.gather(tcp_to_ws(), ws_to_tcp())
+    # Correr ambas tareas
+    t1 = asyncio.create_task(tcp_to_ws())
+    t2 = asyncio.create_task(ws_to_tcp())
+    
+    # Si el navegador hace F5, una de las dos tareas muere al instante.
+    # FIRST_COMPLETED hace que no nos quedemos colgados esperando a la otra.
+    await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
+    
+    # Matar la tarea que haya quedado viva (para destrabar el puente)
+    t1.cancel()
+    t2.cancel()
+    
+    # Colgarle el teléfono al servidor TCP para que libere tu Nick
+    try:
+        writer.close()
+        await writer.wait_closed()
+    except Exception:
+        pass
+
     print(f"[bridge] Cliente desconectado: {websocket.remote_address}")
 
 

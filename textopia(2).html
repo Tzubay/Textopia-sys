@@ -19,6 +19,7 @@
     --green: #2ea85a;
     --purple: #7c52d4;
     --global-red: #d94040;
+    --orange: #fd9644;
     --text-dark: #1a2530;
     --text-mid: #4a5f70;
     --text-light: #8a9eac;
@@ -214,7 +215,7 @@
   }
 
   .sidebar-item.public-group {
-    color: var(--purple);
+    color: var(--orange);
     font-weight: 500;
     border-bottom: 2px solid var(--purple);
     border-radius: 0;
@@ -876,8 +877,28 @@
       // "Ahora estas en 'NombreSala'..." — confirmacion de /intro
       const introMatch = texto.match(/Ahora est.s en \'([^\']+)\'/);
       if (introMatch) {
-        // Ya estamos en el grupo, solo confirmamos silenciosamente
-        agregarSysMsg(introMatch[1], 'Te uniste a ' + introMatch[1]);
+        const room = introMatch[1];
+        const hist = chatHistory[room] || [];
+        // Verificamos si ya tenemos el mensaje para no spamearlo
+        const yaAviso = hist.some(m => m.sys && m.texto.includes('Te uniste a'));
+        if (!yaAviso) {
+            agregarSysMsg(room, 'Te uniste a ' + room);
+        }
+        return;
+      }
+
+      // 1. Capturar cuando OTRA PERSONA abandona la sala
+      const leftRoomMatch = texto.match(/^(\S+) salió permanentemente de la sala (.+)\.$/);
+      if (leftRoomMatch) {
+        agregarSysMsg(leftRoomMatch[2], `${leftRoomMatch[1]} abandonó el grupo.`);
+        return;
+      }
+
+      // 2. Capturar cuando TÚ abandonas la sala
+      const miSalidaMatch = texto.match(/^Saliste (?:permanentemente )?de \'([^\']+)\'/);
+      if (miSalidaMatch) {
+        const roomName = miSalidaMatch[1];
+        agregarSysMsg(roomName, texto);
         return;
       }
 
@@ -1028,7 +1049,22 @@
 
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
-    bubble.textContent = texto;
+
+    // Creamos el texto del mensaje
+    const textSpan = document.createElement('span');
+    textSpan.textContent = texto;
+
+    // Creamos la hora chiquita
+    const timeSpan = document.createElement('span');
+    timeSpan.style.fontSize = '0.7em';
+    timeSpan.style.opacity = '0.6';
+    timeSpan.style.marginLeft = '12px';
+    timeSpan.style.float = 'right';
+    timeSpan.style.marginTop = '10px';
+    timeSpan.textContent = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+
+    bubble.appendChild(textSpan);
+    bubble.appendChild(timeSpan);
 
     group.appendChild(nickEl);
     group.appendChild(bubble);
