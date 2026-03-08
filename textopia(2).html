@@ -1,0 +1,1242 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Textopia</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f4f7f9;
+    --sidebar-bg: #edf2f5;
+    --chat-bg: #ffffff;
+    --bubble-blue: #4a9fd4;
+    --bubble-self: #f0f4f8;
+    --header-bg: #edf2f5;
+    --input-bg: #f4f7f9;
+    --online-dot: #3dba60;
+    --red: #d94040;
+    --green: #2ea85a;
+    --purple: #7c52d4;
+    --global-red: #d94040;
+    --text-dark: #1a2530;
+    --text-mid: #4a5f70;
+    --text-light: #8a9eac;
+    --border: #d4e0e8;
+    --shadow: 0 4px 24px rgba(40,80,120,0.08);
+    --radius: 18px;
+    --radius-sm: 10px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: #d8e8f0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+
+  /* LOGIN SCREEN */
+  #login-screen {
+    background: var(--bg);
+    border-radius: var(--radius);
+    padding: 48px 40px;
+    width: 380px;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    animation: fadeIn 0.4s ease;
+  }
+
+  #login-screen h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: 2.2rem;
+    font-weight: 800;
+    color: var(--text-dark);
+    letter-spacing: -1px;
+  }
+
+  #login-screen h1 span { color: var(--bubble-blue); }
+
+  #login-screen p {
+    color: var(--text-mid);
+    font-size: 0.95rem;
+  }
+
+  .login-input {
+    background: white;
+    border: 2px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 14px 18px;
+    font-size: 1rem;
+    font-family: 'DM Sans', sans-serif;
+    color: var(--text-dark);
+    outline: none;
+    transition: border 0.2s;
+  }
+
+  .login-input:focus { border-color: var(--bubble-blue); }
+
+  .login-btn {
+    background: var(--bubble-blue);
+    color: white;
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 14px;
+    font-size: 1rem;
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+  }
+
+  .login-btn:hover { opacity: 0.88; transform: translateY(-1px); }
+
+  /* MAIN APP */
+  #app {
+    display: none;
+    width: 100%;
+    max-width: 1100px;
+    height: 85vh;
+    min-height: 560px;
+    background: var(--bg);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    animation: fadeIn 0.4s ease;
+  }
+
+  .app-inner {
+    display: flex;
+    height: 100%;
+  }
+
+  /* SIDEBAR */
+  .sidebar {
+    width: 300px;
+    min-width: 240px;
+    background: var(--sidebar-bg);
+    border-right: 1.5px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 16px 16px;
+    gap: 0;
+    overflow-y: auto;
+  }
+
+  .sidebar-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 18px;
+    flex-wrap: nowrap;
+  }
+
+  .sidebar-logo {
+    font-family: 'Syne', sans-serif;
+    font-weight: 800;
+    font-size: 1.2rem;
+    color: var(--text-dark);
+    letter-spacing: -0.5px;
+    flex-shrink: 0;
+  }
+
+  .new-group-btn {
+    background: var(--text-dark);
+    color: white;
+    border: none;
+    border-radius: 20px;
+    padding: 7px 12px;
+    font-size: 0.74rem;
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.1s;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .new-group-btn:hover { background: var(--bubble-blue); transform: scale(1.04); }
+
+  .sidebar-section-label {
+    font-family: 'Syne', sans-serif;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--text-light);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin: 14px 0 6px;
+  }
+
+  .sidebar-divider {
+    height: 1.5px;
+    background: var(--border);
+    margin-bottom: 8px;
+  }
+
+  .sidebar-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background 0.15s;
+    margin-bottom: 2px;
+    border-bottom: 2px solid transparent;
+  }
+
+  .sidebar-item:hover { background: rgba(58,180,242,0.10); }
+  .sidebar-item.active { background: rgba(58,180,242,0.18); }
+
+  .sidebar-item.global {
+    color: var(--global-red);
+    font-weight: 600;
+    font-size: 1rem;
+    font-family: 'Syne', sans-serif;
+    border-bottom: 2px solid var(--global-red);
+    border-radius: 0;
+    margin-bottom: 6px;
+  }
+
+  .sidebar-item.private-group {
+    color: var(--purple);
+    font-weight: 500;
+    border-bottom: 2px solid var(--purple);
+    border-radius: 0;
+    font-size: 0.95rem;
+  }
+
+  .sidebar-item.public-group {
+    color: var(--purple);
+    font-weight: 500;
+    border-bottom: 2px solid var(--purple);
+    border-radius: 0;
+    font-size: 0.95rem;
+  }
+
+  .sidebar-item.online-user {
+    color: var(--green);
+    font-weight: 500;
+    border-bottom: 2px solid var(--green);
+    border-radius: 0;
+    font-size: 0.93rem;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .sidebar-item.online-user .user-name { flex: 1; }
+  .sidebar-item.online-user .online-dot { flex-shrink: 0; margin-left: auto; }
+  .sidebar-item.online-user .unread-badge { flex-shrink: 0; }
+
+  .online-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--online-dot);
+    flex-shrink: 0;
+  }
+
+  /* CHAT PANEL */
+  .chat-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: var(--chat-bg);
+    min-width: 0;
+  }
+
+  .chat-header {
+    background: var(--header-bg);
+    border-bottom: 1.5px solid var(--border);
+    padding: 16px 24px;
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 1.1rem;
+    color: var(--text-dark);
+    border-radius: 0 var(--radius) 0 0;
+  }
+
+  .chat-actions {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 10px 18px 0;
+    border-bottom: 1.5px solid var(--border);
+    background: var(--chat-bg);
+  }
+
+  .action-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    cursor: pointer;
+    padding: 6px 8px;
+    border-radius: 8px;
+    transition: background 0.15s;
+    border: none;
+    background: transparent;
+  }
+
+  .action-btn:hover { background: rgba(0,0,0,0.06); }
+
+  .action-btn .icon {
+    font-size: 1.5rem;
+  }
+
+  .action-btn .label {
+    font-size: 0.68rem;
+    font-weight: 600;
+    font-family: 'Syne', sans-serif;
+  }
+
+  .action-btn.leave .label { color: var(--red); }
+  .action-btn.invite .label { color: var(--green); }
+
+  /* MESSAGES */
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    scroll-behavior: smooth;
+  }
+
+  .message-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-width: 65%;
+  }
+
+  .message-group.self {
+    align-self: flex-end;
+    align-items: flex-end;
+  }
+
+  .message-group.other {
+    align-self: flex-start;
+    align-items: flex-start;
+  }
+
+  .msg-nick {
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 0.82rem;
+    margin-bottom: 2px;
+  }
+
+  .msg-bubble {
+    padding: 10px 18px;
+    border-radius: 20px;
+    font-size: 0.97rem;
+    line-height: 1.4;
+    word-break: break-word;
+  }
+
+  .message-group.other .msg-bubble {
+    background: var(--bubble-blue);
+    color: white;
+    border-bottom-left-radius: 4px;
+  }
+
+  .message-group.self .msg-bubble {
+    background: var(--bubble-self);
+    color: var(--text-dark);
+    border-bottom-right-radius: 4px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  }
+
+  /* COLORS PER USER */
+  .color-0 { color: #e84040; }
+  .color-1 { color: #28c76f; }
+  .color-2 { color: #3ab4f2; }
+  .color-3 { color: #f7b731; }
+  .color-4 { color: #8b5cf6; }
+  .color-5 { color: #fd9644; }
+
+  /* INPUT AREA */
+  .input-area {
+    padding: 14px 18px;
+    background: var(--input-bg);
+    border-top: 1.5px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border-radius: 0 0 var(--radius) 0;
+  }
+
+  .msg-input {
+    flex: 1;
+    background: rgba(255,255,255,0.5);
+    border: 1.5px solid var(--border);
+    border-radius: 20px;
+    padding: 11px 18px;
+    font-size: 0.97rem;
+    font-family: 'DM Sans', sans-serif;
+    color: var(--text-dark);
+    outline: none;
+    transition: border 0.2s, background 0.2s;
+  }
+
+  .msg-input:focus {
+    border-color: var(--bubble-blue);
+    background: white;
+  }
+
+  .msg-input::placeholder { color: var(--text-light); }
+
+  .send-btn {
+    background: var(--bubble-blue);
+    border: none;
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: opacity 0.2s, transform 0.15s;
+  }
+
+  .send-btn:hover { opacity: 0.85; transform: scale(1.08); }
+
+  .send-btn svg { width: 18px; height: 18px; fill: white; }
+
+  /* MODAL */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(20,40,60,0.35);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .modal-overlay.open { display: flex; }
+
+  .modal {
+    background: white;
+    border-radius: var(--radius);
+    padding: 32px 28px;
+    width: 360px;
+    box-shadow: 0 8px 40px rgba(20,60,100,0.18);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    animation: popIn 0.25s cubic-bezier(.34,1.56,.64,1);
+  }
+
+  .modal h2 {
+    font-family: 'Syne', sans-serif;
+    font-weight: 800;
+    font-size: 1.2rem;
+    color: var(--text-dark);
+  }
+
+  .modal label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-mid);
+    margin-bottom: 4px;
+    display: block;
+  }
+
+  .modal input[type="text"] {
+    width: 100%;
+    background: #f0f6fa;
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 0.95rem;
+    font-family: 'DM Sans', sans-serif;
+    outline: none;
+    transition: border 0.2s;
+  }
+
+  .modal input[type="text"]:focus { border-color: var(--bubble-blue); }
+
+  .modal-radio-group {
+    display: flex;
+    gap: 24px;
+    align-items: center;
+  }
+
+  .modal-radio-group label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    margin: 0;
+    color: var(--text-dark);
+  }
+
+  .modal-radio-group input[type="radio"] {
+    accent-color: var(--bubble-blue);
+    width: 16px;
+    height: 16px;
+  }
+
+  .modal-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    margin-top: 4px;
+  }
+
+  .modal-cancel {
+    background: #e8eef4;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-family: 'Syne', sans-serif;
+    font-weight: 600;
+    cursor: pointer;
+    color: var(--text-mid);
+    transition: background 0.15s;
+  }
+
+  .modal-cancel:hover { background: #d0dce8; }
+
+  .modal-confirm {
+    background: var(--bubble-blue);
+    border: none;
+    border-radius: 8px;
+    padding: 10px 20px;
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    cursor: pointer;
+    color: white;
+    transition: opacity 0.15s;
+  }
+
+  .modal-confirm:hover { opacity: 0.85; }
+
+  /* INVITE MODAL */
+  #invite-modal .modal { width: 320px; }
+
+  /* SYSTEM MESSAGES */
+  .sys-msg {
+    text-align: center;
+    color: var(--text-light);
+    font-size: 0.78rem;
+    font-style: italic;
+    padding: 2px 0;
+  }
+
+  /* SCROLLBAR */
+  .messages::-webkit-scrollbar { width: 5px; }
+  .messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  .sidebar::-webkit-scrollbar { width: 4px; }
+  .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  /* UNREAD NOTIFICATIONS */
+  .sidebar-item.unread {
+    background: rgba(74, 159, 212, 0.12);
+    animation: pulseUnread 2s ease-in-out infinite;
+  }
+
+  .unread-badge {
+    background: var(--bubble-blue);
+    color: white;
+    font-size: 0.65rem;
+    font-weight: 700;
+    font-family: 'Syne', sans-serif;
+    min-width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 5px;
+    flex-shrink: 0;
+    animation: popIn 0.2s cubic-bezier(.34,1.56,.64,1);
+  }
+
+  .sidebar-item.global.unread .unread-badge { background: var(--global-red); }
+  .sidebar-item.private-group.unread .unread-badge { background: var(--purple); }
+  .sidebar-item.public-group.unread .unread-badge { background: var(--purple); }
+  .sidebar-item.online-user.unread .unread-badge { background: var(--green); }
+
+  @keyframes pulseUnread {
+    0%, 100% { background: rgba(74,159,212,0.10); }
+    50%       { background: rgba(74,159,212,0.22); }
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes popIn {
+    from { opacity: 0; transform: scale(0.88); }
+    to { opacity: 1; transform: scale(1); }
+  }
+
+  @keyframes msgIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .message-group { animation: msgIn 0.22s ease; }
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="login-screen">
+  <div>
+    <h1>Texto<span>pia</span></h1>
+    <p style="margin-top:6px">Ingresa tu nick para comenzar a chatear</p>
+  </div>
+  <input class="login-input" id="login-nick" type="text" placeholder="Tu nick (ej: Max)" maxlength="20" />
+  <input class="login-input" id="login-host" type="text" placeholder="Host (default: 127.0.0.1)" value="127.0.0.1" />
+  <input class="login-input" id="login-port" type="text" placeholder="Puerto (default: 5050)" value="5050" />
+  <button class="login-btn" onclick="conectar()">Entrar al chat →</button>
+  <p id="login-error" style="color:#e84040;font-size:0.85rem;display:none"></p>
+</div>
+
+<!-- APP -->
+<div id="app">
+  <div class="app-inner">
+    <!-- SIDEBAR -->
+    <div class="sidebar">
+      <div class="sidebar-top">
+        <span class="sidebar-logo">Textopia</span>
+        <button class="new-group-btn" onclick="abrirModalGrupo()">+ Nuevo grupo</button>
+      </div>
+
+      <!-- Chat Global -->
+      <div class="sidebar-item global active" onclick="seleccionarChat('global', 'Chat Global')">
+        Chat Global
+      </div>
+
+      <!-- Mis grupos privados -->
+      <div class="sidebar-section-label">Mis grupos Privados</div>
+      <div class="sidebar-divider"></div>
+      <div id="private-groups"></div>
+
+      <!-- Grupos públicos -->
+      <div class="sidebar-section-label">Grupos públicos</div>
+      <div class="sidebar-divider"></div>
+      <div id="public-groups"></div>
+
+      <!-- En línea -->
+      <div class="sidebar-section-label">En Línea</div>
+      <div class="sidebar-divider"></div>
+      <div id="online-users"></div>
+    </div>
+
+    <!-- CHAT -->
+    <div class="chat-panel">
+      <div class="chat-header" id="chat-header">Chat Global</div>
+
+      <div class="chat-actions" id="chat-actions" style="display:none">
+        <button class="action-btn leave" onclick="dejarGrupo()">
+          <span class="icon">⬅️</span>
+          <span class="label">Dejar Grupo</span>
+        </button>
+        <button class="action-btn invite" onclick="abrirModalInvitar()">
+          <span class="icon">➡️👤</span>
+          <span class="label">Invitar amigo</span>
+        </button>
+      </div>
+
+      <div class="messages" id="messages"></div>
+
+      <div class="input-area">
+        <input class="msg-input" id="msg-input" type="text" placeholder="Escribe un mensaje..." onkeydown="if(event.key==='Enter') enviarMensaje()" />
+        <button class="send-btn" onclick="enviarMensaje()">
+          <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL CREAR GRUPO -->
+<div class="modal-overlay" id="modal-grupo">
+  <div class="modal">
+    <h2>+ Nuevo grupo</h2>
+    <div>
+      <label>Nombre del grupo</label>
+      <input type="text" id="grupo-nombre" placeholder="Ej: Las_Delireñas" />
+    </div>
+    <div>
+      <label>Participantes (separados por coma)</label>
+      <input type="text" id="grupo-participantes" placeholder="Ej: Max, Braulio, Emma" />
+    </div>
+    <div>
+      <label>Visibilidad</label>
+      <div class="modal-radio-group">
+        <label><input type="radio" name="grupo-status" value="PUBLIC" checked /> Público</label>
+        <label><input type="radio" name="grupo-status" value="PRIVATE" /> Privado</label>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="modal-cancel" onclick="cerrarModal('modal-grupo')">Cancelar</button>
+      <button class="modal-confirm" onclick="crearGrupo()">Crear grupo</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL INVITAR -->
+<div class="modal-overlay" id="invite-modal">
+  <div class="modal">
+    <h2>Invitar amigo</h2>
+    <div>
+      <label>Nick del usuario</label>
+      <input type="text" id="invite-nick" placeholder="Ej: Diego" />
+    </div>
+    <div class="modal-actions">
+      <button class="modal-cancel" onclick="cerrarModal('invite-modal')">Cancelar</button>
+      <button class="modal-confirm" onclick="enviarInvitacion()">Invitar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ─── STATE ────────────────────────────────────────────────────────────────
+  let ws = null;
+  let myNick = '';
+  let currentChat = 'global'; // 'global' | '@nick' | 'roomName'
+  let currentChatLabel = 'Chat Global';
+  let isInRoom = false;
+
+  // mensajes por chat: { 'global': [...], '@Nick': [...], 'RoomName': [...] }
+  const chatHistory = { global: [] };
+
+  // grupos conocidos
+  const privateGroups = new Set();
+  const publicGroups = new Set();
+  const onlineUsers = new Set();
+  const pendingRooms = new Set(); // grupos recibidos antes de saber si son publicos o privados
+  const unreadCounts = {}; // { chatKey: count }
+
+  // colores de usuarios
+  const userColors = {};
+  const colorClasses = ['color-0','color-1','color-2','color-3','color-4','color-5'];
+  let colorIdx = 0;
+
+  function getColor(nick) {
+    if (!userColors[nick]) {
+      userColors[nick] = colorClasses[colorIdx % colorClasses.length];
+      colorIdx++;
+    }
+    return userColors[nick];
+  }
+
+  // ─── CONEXIÓN ─────────────────────────────────────────────────────────────
+  function conectar() {
+    const nick = document.getElementById('login-nick').value.trim();
+    const host = document.getElementById('login-host').value.trim() || '127.0.0.1';
+    const port = document.getElementById('login-port').value.trim() || '5050';
+
+    if (!nick) { mostrarError('Escribe tu nick para continuar'); return; }
+
+    myNick = nick;
+    userColors[nick] = 'color-2'; // self is blue
+
+    // We connect to a WebSocket bridge. If server doesn't support WS,
+    // fall into demo mode so the UI is still testable.
+    // El bridge.py escucha en puerto 6060 por defecto
+    const wsPort = 6060;
+    const wsUrl = `ws://${host}:${wsPort}`;
+    try {
+      ws = new WebSocket(wsUrl);
+      ws.onopen = () => {
+        ws.send('NICK ' + nick + '\n');
+        mostrarApp();
+        // Pedir lista de usuarios conectados al entrar
+        setTimeout(function() {
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send('/who\n');
+        }, 800);
+      };
+      ws.onmessage = (e) => procesarMensaje(e.data);
+      ws.onerror = () => { modoDemo(); };
+      ws.onclose = () => { agregarSysMsg(currentChat, 'Desconectado del servidor.'); };
+    } catch(e) {
+      modoDemo();
+    }
+  }
+
+  function modoDemo() {
+    // Run in demo mode with fake messages so the UI is fully testable
+    mostrarApp();
+    setTimeout(() => {
+      agregarMensaje('global', 'Braulio', '¡Hola a todos!');
+      agregarOnlineUser('Braulio');
+    }, 600);
+    setTimeout(() => {
+      agregarMensaje('global', 'Max', '¿Qué rollo!!!');
+      agregarOnlineUser('Max');
+    }, 1200);
+    setTimeout(() => {
+      agregarGrupoPrivado('Proyecto_grupo');
+      agregarGrupoPublico('Conocer_Gente');
+      agregarOnlineUser('W');
+    }, 1600);
+    agregarSysMsg('global', 'Modo demo activo — conecta el servidor para chat en tiempo real.');
+  }
+
+  function procesarMensaje(raw) {
+    const line = raw.trim();
+    if (!line) return;
+
+    // Mensajes de sistema (empiezan con *)
+    if (line.startsWith('*')) {
+      const texto = line.replace(/^\*\s*/, '');
+
+      // "Te agregaron a la sala 'NombreSala' (PUBLIC/PRIVATE) por Owner"
+      const agregadoMatch = texto.match(/Te agregaron a la sala \'([^\']+)\' \((PUBLIC|PRIVATE)\)/);
+      if (agregadoMatch) {
+        const roomName = agregadoMatch[1], status = agregadoMatch[2];
+        if (status === 'PRIVATE') agregarGrupoPrivado(roomName);
+        else agregarGrupoPublico(roomName);
+        agregarSysMsg(roomName, texto);
+        return;
+      }
+
+      // "Sala creada: NombreSala (PUBLIC/PRIVATE). Owner: ..."
+      const creadaMatch = texto.match(/Sala creada: (\S+) \((PUBLIC|PRIVATE)\)/);
+      if (creadaMatch) {
+        const roomName = creadaMatch[1], status = creadaMatch[2];
+        if (status === 'PRIVATE') agregarGrupoPrivado(roomName);
+        else agregarGrupoPublico(roomName);
+        seleccionarChat(roomName, roomName);
+        agregarSysMsg(roomName, texto);
+        return;
+      }
+
+      // "Ya eres miembro de: sala1, sala2"
+      const miembroMatch = texto.match(/Ya eres miembro de: (.+)/);
+      if (miembroMatch) {
+        // Guardamos los grupos pendientes; cuando llegue la lista de publicos los clasificamos
+        miembroMatch[1].split(',').map(function(s) { return s.trim(); }).forEach(function(r) {
+          if (r) pendingRooms.add(r);
+        });
+        return;
+      }
+
+      // "Sala activa: NombreSala" — ignorar silenciosamente
+      if (texto.match(/^Sala activa:/)) return;
+
+      // "Conectados: user1, user2" — respuesta de /who
+      const whoMatch = texto.match(/^Conectados: (.+)$/);
+      if (whoMatch) {
+        whoMatch[1].split(',').map(function(s) { return s.trim(); }).forEach(function(u) {
+          if (u && u !== myNick && u !== '(nadie)') agregarOnlineUser(u);
+        });
+        return;
+      }
+
+      // "Salas PUBLIC: sala1, sala2" — respuesta de /who
+      const publicWhoMatch = texto.match(/^Salas PUBLIC: (.+)$/);
+      if (publicWhoMatch) {
+        const salas = publicWhoMatch[1].trim();
+        if (salas && salas !== '(ninguna)') {
+          salas.split(',').map(function(s) { return s.trim(); }).forEach(function(r) {
+            if (r) {
+              agregarGrupoPublico(r);
+              pendingRooms.delete(r); // ya clasificado como publico
+            }
+          });
+        }
+        // Lo que quede en pendingRooms son privados
+        pendingRooms.forEach(function(r) { agregarGrupoPrivado(r); });
+        pendingRooms.clear();
+        return;
+      }
+
+      // "Tus salas PRIVATE (solo si eres miembro): sala1" — respuesta de /who
+      const privateWhoMatch = texto.match(/^Tus salas PRIVATE[^:]*: (.+)$/);
+      if (privateWhoMatch) {
+        const salas = privateWhoMatch[1].trim();
+        if (salas && salas !== '(ninguna)') {
+          salas.split(',').map(function(s) { return s.trim(); }).forEach(function(r) {
+            if (r) agregarGrupoPrivado(r);
+          });
+        }
+        return;
+      }
+
+      // "Ahora estas en 'NombreSala'..." — confirmacion de /intro
+      const introMatch = texto.match(/Ahora est.s en \'([^\']+)\'/);
+      if (introMatch) {
+        // Ya estamos en el grupo, solo confirmamos silenciosamente
+        agregarSysMsg(introMatch[1], 'Te uniste a ' + introMatch[1]);
+        return;
+      }
+
+      // "No estas en 'Bob2'. Entra con: /intro Bob2" — ignorar, ya mandamos /intro automatico
+      if (texto.match(/No est.s en \'[^\']+\'/)) return;
+
+      // "NickUsuario se unio al chat."
+      const joinMatch = texto.match(/^(\S+) se uni/);
+      if (joinMatch) {
+        agregarOnlineUser(joinMatch[1]);
+        agregarSysMsg('global', texto);
+        return;
+      }
+
+      // "NickUsuario salio."
+      const saleMatch = texto.match(/^(\S+) (sali|fue desconectado)/);
+      if (saleMatch) {
+        quitarOnlineUser(saleMatch[1]);
+        agregarSysMsg('global', texto);
+        return;
+      }
+
+      // Mensajes de sistema genericos que no queremos mostrar
+      const silenciar = [
+        'Bienvenido. Escribe: NICK tu_nombre',
+        'Sala activa:',
+        'OK',
+        'Conectado como',
+        'Escribe /help para comandos',
+        'Primero define tu nombre',
+        'Comandos:',
+        'DM:',
+      ];
+      if (silenciar.some(function(s) { return texto.startsWith(s); })) return;
+
+      agregarSysMsg(currentChat, texto);
+      return;
+    }
+
+    // [Room:NombreSala] Nick: mensaje
+    const roomMatch = line.match(/^\[Room:([^\]]+)\] ([^:]+): (.+)$/);
+    if (roomMatch) {
+      const roomName = roomMatch[1], nick = roomMatch[2].trim(), msg = roomMatch[3];
+      if (!chatHistory[roomName]) chatHistory[roomName] = [];
+      agregarMensaje(roomName, nick, msg);
+      return;
+    }
+
+    // [DM de Nick] mensaje
+    const dmDeMatch = line.match(/^\[DM de ([^\]]+)\] (.+)$/);
+    if (dmDeMatch) {
+      const from = dmDeMatch[1].trim(), msg = dmDeMatch[2];
+      const key = '@' + from;
+      if (!chatHistory[key]) chatHistory[key] = [];
+      agregarOnlineUser(from);
+      agregarMensaje(key, from, msg);
+      return;
+    }
+
+    // [DM a Nick] mensaje — echo del propio DM, ignorar
+    if (line.match(/^\[DM a [^\]]+\]/)) return;
+
+    // [Nick] mensaje — chat global
+    const globalMatch = line.match(/^\[([^\]]+)\] (.+)$/);
+    if (globalMatch) {
+      const nick = globalMatch[1].trim(), msg = globalMatch[2];
+      agregarMensaje('global', nick, msg);
+      return;
+    }
+
+    agregarSysMsg(currentChat, line);
+  }
+
+  // ─── UI HELPERS ───────────────────────────────────────────────────────────
+  function mostrarApp() {
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+  }
+
+  function mostrarError(msg) {
+    const el = document.getElementById('login-error');
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+
+  function agregarMensaje(chatKey, nick, texto) {
+    if (!chatHistory[chatKey]) chatHistory[chatKey] = [];
+    chatHistory[chatKey].push({ nick, texto });
+    if (currentChat === chatKey) {
+      renderMensaje(nick, texto);
+    } else {
+      // Incrementar contador de no leidos
+      unreadCounts[chatKey] = (unreadCounts[chatKey] || 0) + 1;
+      actualizarBadge(chatKey);
+    }
+  }
+
+  function actualizarBadge(chatKey) {
+    const count = unreadCounts[chatKey] || 0;
+    const el = document.querySelector('[data-chat="' + chatKey + '"]');
+    if (!el) return;
+
+    let badge = el.querySelector('.unread-badge');
+    if (count === 0) {
+      el.classList.remove('unread');
+      if (badge) badge.remove();
+      return;
+    }
+
+    el.classList.add('unread');
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'unread-badge';
+      el.appendChild(badge);
+    }
+    // Chat global: solo punto rojo sin numero
+    if (chatKey === 'global') {
+      badge.textContent = '';
+      badge.style.cssText = 'background:var(--global-red);width:10px;height:10px;min-width:10px;border-radius:50%;padding:0;';
+    } else {
+      badge.style.cssText = '';
+      badge.textContent = count > 99 ? '99+' : count;
+    }
+  }
+
+  function agregarSysMsg(chatKey, texto) {
+    if (!chatHistory[chatKey]) chatHistory[chatKey] = [];
+    chatHistory[chatKey].push({ sys: true, texto });
+    if (currentChat === chatKey) {
+      const el = document.createElement('div');
+      el.className = 'sys-msg';
+      el.textContent = texto;
+      document.getElementById('messages').appendChild(el);
+      scrollBottom();
+    }
+  }
+
+  function renderMensaje(nick, texto) {
+    const isSelf = nick === myNick || nick.trim() === myNick.trim();
+    const container = document.getElementById('messages');
+
+    const group = document.createElement('div');
+    group.className = `message-group ${isSelf ? 'self' : 'other'}`;
+
+    const nickEl = document.createElement('div');
+    nickEl.className = `msg-nick ${getColor(nick)}`;
+    nickEl.textContent = nick;
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.textContent = texto;
+
+    group.appendChild(nickEl);
+    group.appendChild(bubble);
+    container.appendChild(group);
+    scrollBottom();
+  }
+
+  function renderChatCompleto(chatKey) {
+    const container = document.getElementById('messages');
+    container.innerHTML = '';
+    const hist = chatHistory[chatKey] || [];
+    hist.forEach(item => {
+      if (item.sys) {
+        const el = document.createElement('div');
+        el.className = 'sys-msg';
+        el.textContent = item.texto;
+        container.appendChild(el);
+      } else {
+        renderMensaje(item.nick, item.texto);
+      }
+    });
+    scrollBottom();
+  }
+
+  function scrollBottom() {
+    const c = document.getElementById('messages');
+    c.scrollTop = c.scrollHeight;
+  }
+
+  function seleccionarChat(key, label) {
+    currentChat = key;
+    currentChatLabel = label;
+    document.getElementById('chat-header').textContent = label;
+
+    // show/hide group actions
+    const isRoom = key !== 'global' && !key.startsWith('@');
+    document.getElementById('chat-actions').style.display = isRoom ? 'flex' : 'none';
+    isInRoom = isRoom;
+
+    // Limpiar no leidos
+    unreadCounts[key] = 0;
+    actualizarBadge(key);
+
+    renderChatCompleto(key);
+    actualizarSidebarActivo(key);
+  }
+
+  function actualizarSidebarActivo(key) {
+    document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+    const target = document.querySelector(`[data-chat="${key}"]`);
+    if (target) target.classList.add('active');
+  }
+
+  function agregarGrupoPrivado(nombre) {
+    if (privateGroups.has(nombre)) return;
+    privateGroups.add(nombre);
+    if (!chatHistory[nombre]) chatHistory[nombre] = [];
+    const el = document.createElement('div');
+    el.className = 'sidebar-item private-group';
+    el.setAttribute('data-chat', nombre);
+    el.textContent = nombre;
+    el.onclick = () => seleccionarChat(nombre, nombre);
+    document.getElementById('private-groups').appendChild(el);
+  }
+
+  function agregarGrupoPublico(nombre) {
+    if (publicGroups.has(nombre)) return;
+    publicGroups.add(nombre);
+    if (!chatHistory[nombre]) chatHistory[nombre] = [];
+    const el = document.createElement('div');
+    el.className = 'sidebar-item public-group';
+    el.setAttribute('data-chat', nombre);
+    el.textContent = nombre;
+    el.onclick = function() {
+      seleccionarChat(nombre, nombre);
+      // Unirse automaticamente al grupo publico si no somos miembros
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send('/intro ' + nombre + '\n');
+      }
+    };
+    document.getElementById('public-groups').appendChild(el);
+  }
+
+  function agregarOnlineUser(nick) {
+    if (onlineUsers.has(nick) || nick === myNick) return;
+    onlineUsers.add(nick);
+    const key = `@${nick}`;
+    if (!chatHistory[key]) chatHistory[key] = [];
+    const el = document.createElement('div');
+    el.className = 'sidebar-item online-user';
+    el.setAttribute('data-chat', key);
+    el.innerHTML = '<span class="user-name">' + nick + '</span><span class="online-dot"></span>';
+    el.onclick = () => seleccionarChat(key, `@${nick}`);
+    document.getElementById('online-users').appendChild(el);
+  }
+
+  // ─── ENVIAR ───────────────────────────────────────────────────────────────
+  function enviarMensaje() {
+    const input = document.getElementById('msg-input');
+    const texto = input.value.trim();
+    if (!texto) return;
+    input.value = '';
+
+    let cmd = '';
+
+    if (currentChat === 'global') {
+      // Mensaje global: el servidor hace echo a todos incluido el emisor
+      cmd = texto + '\n';
+    } else if (currentChat.startsWith('@')) {
+      // Mensaje privado: mostramos localmente (el servidor NO hace echo al emisor)
+      const nick = currentChat.slice(1);
+      cmd = '@' + nick + ' ' + texto + '\n';
+      agregarMensaje(currentChat, myNick, texto);
+    } else {
+      // Mensaje a sala: el servidor hace echo al emisor con [Room:Sala] Nick: msg
+      cmd = '@' + currentChat + ' ' + texto + '\n';
+    }
+
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(cmd);
+  }
+
+  // ─── GRUPOS ───────────────────────────────────────────────────────────────
+  function abrirModalGrupo() {
+    document.getElementById('modal-grupo').classList.add('open');
+  }
+
+  function crearGrupo() {
+    let nombre = document.getElementById('grupo-nombre').value.trim();
+    const participantes = document.getElementById('grupo-participantes').value.trim();
+    const status = document.querySelector('input[name="grupo-status"]:checked').value;
+
+    if (!nombre) return;
+
+    // El servidor solo acepta: letras, numeros, _ y - (sin espacios)
+    nombre = nombre.replace(/\s+/g, '_');
+
+    // Validar formato
+    if (!/^[A-Za-z0-9_][A-Za-z0-9_\-]{0,19}$/.test(nombre)) {
+      alert('Nombre invalido. Solo letras, numeros, _ y - (max 20 chars)');
+      return;
+    }
+
+    const nicks = participantes.split(',').map(function(n) { return n.trim(); }).filter(Boolean);
+    const nicksStr = nicks.length > 0 ? '[' + nicks.join(',') + ']' : '[]';
+    const cmd = '/room ' + nicksStr + ' name ' + nombre + ' status ' + status + '\n';
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(cmd);
+    } else {
+      // modo demo
+      if (status === 'PRIVATE') agregarGrupoPrivado(nombre);
+      else agregarGrupoPublico(nombre);
+      seleccionarChat(nombre, nombre);
+    }
+
+    cerrarModal('modal-grupo');
+    document.getElementById('grupo-nombre').value = '';
+    document.getElementById('grupo-participantes').value = '';
+  }
+
+  function dejarGrupo() {
+    if (!isInRoom) return;
+    const cmd = `/quitroom ${currentChat}\n`;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(cmd);
+    privateGroups.delete(currentChat);
+    publicGroups.delete(currentChat);
+    document.querySelector(`[data-chat="${currentChat}"]`)?.remove();
+    seleccionarChat('global', 'Chat Global');
+  }
+
+  function abrirModalInvitar() {
+    document.getElementById('invite-modal').classList.add('open');
+  }
+
+  function enviarInvitacion() {
+    const nick = document.getElementById('invite-nick').value.trim();
+    if (!nick || !isInRoom) return;
+    const cmd = `/invite [${nick}] room ${currentChat}\n`;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(cmd);
+    cerrarModal('invite-modal');
+    document.getElementById('invite-nick').value = '';
+    agregarSysMsg(currentChat, `Invitación enviada a ${nick}`);
+  }
+
+  function cerrarModal(id) {
+    document.getElementById(id).classList.remove('open');
+  }
+
+  function quitarOnlineUser(nick) {
+    if (!onlineUsers.has(nick)) return;
+    onlineUsers.delete(nick);
+    const key = '@' + nick;
+    const el = document.querySelector('[data-chat="' + key + '"]');
+    if (el) el.remove();
+  }
+
+  // Close modals clicking outside
+  document.querySelectorAll('.modal-overlay').forEach(overlay => {
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) overlay.classList.remove('open');
+    });
+  });
+
+  // Focus nick on load
+  document.getElementById('login-nick').focus();
+  document.getElementById('login-nick').addEventListener('keydown', e => {
+    if (e.key === 'Enter') conectar();
+  });
+</script>
+</body>
+</html>
